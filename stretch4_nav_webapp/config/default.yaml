@@ -1,0 +1,30 @@
+ui_port: 8080
+rosbridge_port: 9090
+# Resolved at runtime: $HELLO_FLEET_PATH/maps or ~/stretch_user/maps
+maps_dir: null
+host: "0.0.0.0"
+
+# Launch templates. {map_yaml}, {keepout_yaml}, {speed_yaml}, {use_rviz} are substituted.
+launches:
+  mapping: "ros2 launch stretch_nav2 offline_mapping.launch.py use_rviz:={use_rviz}"
+  navigation: "ros2 launch stretch_nav2 navigation_mppi.launch.py map:={map_yaml} use_rviz:={use_rviz}"
+  navigation_filters: "ros2 launch stretch_nav2 navigation_mppi_nav2_filters.launch.py map:={map_yaml} keepout_mask:={keepout_yaml} speed_mask:={speed_yaml} enable_keepout:={enable_keepout} enable_speed:={enable_speed} use_rviz:={use_rviz}"
+
+  rosbridge: "ros2 run rosbridge_server rosbridge_websocket --ros-args -p port:={rosbridge_port} -p call_services_in_new_thread:=true -p default_call_service_timeout:=0.0 -p max_message_size:=16000000"
+
+use_rviz: "false"
+
+# Right head camera (Luxonis OAK-FFC-3P) for the on-demand camera panel on the
+camera:
+  label: "Right head camera"
+  launches:
+    - "ros2 launch stretch_core luxonis.launch.py use_left:=false use_right:=true use_center:=false"
+  # Applied (with retries) once the camera node is up. jpeg_quality 60 shrinks
+  # 1920x1200 frames ~460KB -> ~140KB (measured on the robot), ~0.9 MB/s at the
+  # panel's 5 fps. The param lives under cameras_head.LEFT because the driver's
+  # left socket is what the launch remaps to the /cameras_head/right topic
+  # (head ribbon cables are swapped).
+  post_start:
+    - "ros2 param set /cameras_head cameras_head.left.image_raw.compressed.jpeg_quality 60"
+  topic: "/cameras_head/right/image_raw/compressed"
+  rotate_deg: 90

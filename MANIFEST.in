@@ -1,0 +1,13 @@
+include README.md
+recursive-include stretch4_nav_webapp/config *.yaml
+
+# The built UI. It is gitignored but must be in both the wheel and the sdist,
+# so that installing from either one needs no node.
+recursive-include stretch4_nav_webapp/static *
+
+# Frontend sources, so an sdist is a complete source release.
+include frontend/index.html frontend/package.json frontend/package-lock.json frontend/vite.config.js
+recursive-include frontend/src *
+prune frontend/node_modules
+
+global-exclude __pycache__ *.py[cod] .DS_Store
