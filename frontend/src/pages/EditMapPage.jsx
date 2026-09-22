@@ -392,16 +392,19 @@ export default function EditMapPage({ initialMapName = '', onError, onBusy }) {
           <div className="edit-bar__save">
             <button
               type="button"
-              className="btn"
-              disabled={!mapName || saving || needsSetup || shapePanel || layer !== 'occupancy'}
-              onClick={openShapePanel}
+              className={shapePanel ? 'btn selected' : 'btn'}
+              aria-pressed={shapePanel}
+              disabled={!mapName || saving || needsSetup || layer !== 'occupancy'}
+              onClick={shapePanel ? closeShapePanel : openShapePanel}
               title={
-                layer === 'occupancy'
-                  ? 'Trim the empty border off the map or turn it straight.'
-                  : 'Switch to the Occupancy layer to crop or rotate. '
+                shapePanel
+                  ? 'Exit crop & rotate mode and return to editing tools.'
+                  : layer === 'occupancy'
+                    ? 'Trim the empty border off the map or turn it straight.'
+                    : 'Switch to the Occupancy layer to crop or rotate. '
               }
             >
-              Crop &amp; rotate
+              {shapePanel ? '✕ Close crop & rotate' : 'Crop & rotate'}
             </button>
             {dirty && <span className="edit-bar__dirty">Unsaved changes</span>}
             <button

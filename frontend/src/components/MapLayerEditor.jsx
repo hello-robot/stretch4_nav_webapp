@@ -9,8 +9,13 @@ const SHAPE_TOOLS = ['circle', 'rect', 'freehand'];
 // the robot's own mask, so a mask drawn here behaves like one drawn by hand.
 const BINARY_ON = 153;
 
+// Unknown space pixel value in ROS OccupancyGrid / trinary map representation
+// (grey, corresponds to unseen / unobserved space).
+const UNKNOWN_PIXEL = 205;
+
 const TOOLS = [
   { id: 'brush', label: 'Brush', title: 'Paint free-hand. Drag to draw.' },
+  { id: 'unknown', label: 'Unknown', title: 'Paint unseen / unknown space (grey). Drag to draw.' },
   { id: 'erase', label: 'Erase', title: 'Rub the layer back out. Drag to erase.' },
   { id: 'circle', label: 'Circle', title: 'Click the centre, then click again to set the radius.' },
   { id: 'rect', label: 'Rectangle', title: 'Click one corner, then click the opposite corner.' },
@@ -47,6 +52,11 @@ export default function MapLayerEditor({
 }) {
   const [tool, setTool] = useState('brush');
   const [brushSize, setBrushSize] = useState(3);
+
+  const visibleTools = useMemo(
+    () => TOOLS.filter((t) => t.id !== 'unknown' || colorMode === 'occupancy'),
+    [colorMode]
+  );
 
   const [speedPct, setSpeedPct] = useState(40);
 
@@ -104,12 +114,15 @@ export default function MapLayerEditor({
   // (resetVersion bumps on map switch, layer switch, and after crop/rotate).
   // Undo snapshots from one buffer must never be poppable into another.
   useEffect(() => {
+    if (colorMode !== 'occupancy' && tool === 'unknown') {
+      setTool('brush');
+    }
     history.current = [];
     strokeActive.current = false;
     setCanUndo(false);
     clearShape();
     setSelectedId(null);
-  }, [resetVersion, colorMode, clearShape]);
+  }, [resetVersion, colorMode, tool, clearShape]);
 
   // Adopt externally-changed pixels as the new base. Fires on every fresh load
   // and on page-side edits (e.g. deleting a room clears its pixels); shapes are
@@ -239,7 +252,12 @@ export default function MapLayerEditor({
     emit(next);
   };
 
-  const activeValue = tool === 'erase' ? eraseValueFor(colorMode) : paintValueFor(colorMode);
+  const activeValue =
+    tool === 'erase'
+      ? eraseValueFor(colorMode)
+      : tool === 'unknown'
+        ? UNKNOWN_PIXEL
+        : paintValueFor(colorMode);
 
   // Painting the semantic layer with no room selected would write id 0, which
   // is "unlabelled" — it would read as a brush that silently does nothing.
@@ -247,7 +265,7 @@ export default function MapLayerEditor({
 
   const onPaint = (cx, cy) => {
     if (!canPaint) return;
-    if (tool === 'brush' || tool === 'erase') {
+    if (tool === 'brush' || tool === 'erase' || tool === 'unknown') {
       paintBrush(cx, cy, activeValue, brushSize);
     }
   };
@@ -328,9 +346,9 @@ export default function MapLayerEditor({
   const onToolKey = (e) => {
     if (!['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp'].includes(e.key)) return;
     e.preventDefault();
-    const i = TOOLS.findIndex((t) => t.id === tool);
+    const i = visibleTools.findIndex((t) => t.id === tool);
     const step = e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1 : -1;
-    const next = TOOLS[(i + step + TOOLS.length) % TOOLS.length];
+    const next = visibleTools[(i + step + visibleTools.length) % visibleTools.length];
     selectTool(next.id);
     segRef.current?.querySelector(`[data-tool="${next.id}"]`)?.focus();
   };
@@ -373,7 +391,7 @@ export default function MapLayerEditor({
   // Crop takes over the canvas: nothing can be painted while a box is being set.
   const clickMode = cropMode
     ? 'crop'
-    : tool === 'brush' || tool === 'erase'
+    : tool === 'brush' || tool === 'erase' || tool === 'unknown'
       ? 'paint'
       : SHAPE_TOOLS.includes(tool)
         ? 'shape'
@@ -416,6 +434,9 @@ export default function MapLayerEditor({
     if (colorMode === 'binary') {
       return 'Brush marks the areas the binary filter reacts to; Erase clears them.';
     }
+    if (colorMode === 'occupancy') {
+      return 'Brush paints walls (occupied); Unknown paints unseen space (grey); Erase clears to free space.';
+    }
     return 'Brush paints walls (occupied); Erase clears to free space.';
   };
 
@@ -432,7 +453,7 @@ export default function MapLayerEditor({
             ref={segRef}
             onKeyDown={onToolKey}
           >
-            {TOOLS.map((t) => (
+            {visibleTools.map((t) => (
               <button
                 key={t.id}
                 type="button"
