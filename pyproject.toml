@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hello-robot-stretch4-nav-webapp"
-version = "0.1.0"
+version = "0.1.1"
 description = "Stretch mapping, map editing, and navigation web UI"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -20,7 +20,7 @@ dependencies = [
 ]
 
 [project.scripts]
-stretch4-nav-webapp = "stretch4_nav_webapp.cli:main"
+stretch-nav-webapp = "stretch4_nav_webapp.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

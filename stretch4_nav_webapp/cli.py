@@ -1,4 +1,4 @@
-"""CLI entrypoint: stretch4-nav-webapp"""
+"""CLI entrypoint: stretch-nav-webapp"""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
-logger = logging.getLogger("stretch4-nav-webapp")
+logger = logging.getLogger("stretch-nav-webapp")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -154,7 +154,7 @@ def _ensure_robot_ros_env() -> None:
         f'exec {shlex.quote(sys.executable)} -m stretch4_nav_webapp.cli "$@"'
     )
     logger.info("rclpy not importable — re-executing under a ROS-sourced shell")
-    os.execvp("bash", ["bash", "-c", script, "stretch4-nav-webapp", *sys.argv[1:]])
+    os.execvp("bash", ["bash", "-c", script, "stretch-nav-webapp", *sys.argv[1:]])
 
 
 def _pgid_alive(pgid: int) -> bool:
@@ -175,7 +175,7 @@ def _stop_orphan_mode_launches() -> None:
 
     Only true orphans are touched: a launch whose spawning backend died has
     been reparented to init (PPID 1). A launch whose parent is alive belongs
-    to a running backend — a second ``stretch4-nav-webapp`` (which will fail to bind
+    to a running backend — a second ``stretch-nav-webapp`` (which will fail to bind
     the port a moment later) must not shoot down the healthy one's stack.
     """
     patterns = ("launch stretch_nav2",)

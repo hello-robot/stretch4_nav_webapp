@@ -35,7 +35,7 @@ The web UI ships prebuilt inside the package.
 ### Run it
 
 ```bash
-stretch4-nav-webapp
+stretch-nav-webapp
 ```
 
 Then open **http://\<robot-ip\>:8080** from any browser on the same network
@@ -49,7 +49,7 @@ the UI.
 
 ```bash
 pip3 install --user --upgrade hello-robot-stretch4-nav-webapp
-# then restart stretch4-nav-webapp
+# then restart stretch-nav-webapp
 ```
 
 To run the code from a git checkout instead, see [Developing](#developing).
@@ -59,19 +59,19 @@ To run the code from a git checkout instead, see [Developing](#developing).
 ## CLI flags
 
 ```bash
-stretch4-nav-webapp                                   # normal: UI on :8080, rosbridge on :9090
-stretch4-nav-webapp --port 9000                       # serve the UI on a different port
-stretch4-nav-webapp --rosbridge-port 9091             # move rosbridge
-stretch4-nav-webapp --maps-dir ~/my_maps              # use a different maps folder
-stretch4-nav-webapp --config ~/my_config.yaml         # use a different config file entirely
-stretch4-nav-webapp --print-config-path               # where the default config lives, then exit
-stretch4-nav-webapp --no-rosbridge                    # you already run rosbridge yourself
-stretch4-nav-webapp --host 127.0.0.1                  # local-only, no network access
+stretch-nav-webapp                                   # normal: UI on :8080, rosbridge on :9090
+stretch-nav-webapp --port 9000                       # serve the UI on a different port
+stretch-nav-webapp --rosbridge-port 9091             # move rosbridge
+stretch-nav-webapp --maps-dir ~/my_maps              # use a different maps folder
+stretch-nav-webapp --config ~/my_config.yaml         # use a different config file entirely
+stretch-nav-webapp --print-config-path               # where the default config lives, then exit
+stretch-nav-webapp --no-rosbridge                    # you already run rosbridge yourself
+stretch-nav-webapp --host 127.0.0.1                  # local-only, no network access
 
 # Skip the UI and start a mode immediately:
-stretch4-nav-webapp --mapping
-stretch4-nav-webapp --navigation my_map_name
-stretch4-nav-webapp --edit_map my_map_name
+stretch-nav-webapp --mapping
+stretch-nav-webapp --navigation my_map_name
+stretch-nav-webapp --edit_map my_map_name
 ```
 
 Flags always win over the config file.
@@ -121,9 +121,9 @@ copy, and point the app at it — that way an upgrade never overwrites your
 changes:
 
 ```bash
-cp "$(stretch4-nav-webapp --print-config-path)" ~/my_config.yaml
+cp "$(stretch-nav-webapp --print-config-path)" ~/my_config.yaml
 # edit ~/my_config.yaml
-stretch4-nav-webapp --config ~/my_config.yaml
+stretch-nav-webapp --config ~/my_config.yaml
 ```
 
 ---
@@ -243,7 +243,7 @@ npm install
 npm run build                     # writes stretch4_nav_webapp/static
 cd ..
 
-stretch4-nav-webapp
+stretch-nav-webapp
 ```
 
 > **The UI is served from `stretch4_nav_webapp/static`, not from
@@ -281,7 +281,7 @@ class MyMode(Mode):
 2. Import it from `stretch4_nav_webapp/modes/__init__.py` so it registers itself.
 3. Add a page and a button in `frontend/src/App.jsx` that calls
    `api('/api/modes/my_mode/start', { method: 'POST', body: '{}' })`.
-4. Rebuild the frontend and restart `stretch4-nav-webapp`. The mode also shows up in
+4. Rebuild the frontend and restart `stretch-nav-webapp`. The mode also shows up in
    `GET /api/modes`.
 
 ---
