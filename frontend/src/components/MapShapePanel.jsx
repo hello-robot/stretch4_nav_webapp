@@ -39,6 +39,16 @@ export default function MapShapePanel({
     refreshInfo();
   }, [mapName]);
 
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === 'Escape' && !working) {
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [working, onClose]);
+
   const full = layerData
     ? { left: 0, top: 0, width: layerData.width, height: layerData.height }
     : null;
@@ -135,8 +145,14 @@ export default function MapShapePanel({
         <span className="shape-panel__note">
           Applies to all layers together. Saved locations are updated to match.
         </span>
-        <button type="button" className="btn quiet" onClick={onClose} disabled={working}>
-          Close
+        <button
+          type="button"
+          className="btn sm"
+          onClick={onClose}
+          disabled={working}
+          title="Close crop & rotate and return to editing tools (Esc)"
+        >
+          ✕ Close
         </button>
       </div>
 
@@ -228,7 +244,19 @@ export default function MapShapePanel({
           : 'Adjustments preview on the map. Nothing is saved until you select Apply.'}
       </p>
 
-      {result && <p className="shape-panel__done">{resultText()}</p>}
+      {result && (
+        <div className="shape-panel__row">
+          <p className="shape-panel__done" style={{ margin: 0, flex: 1 }}>{resultText()}</p>
+          <button
+            type="button"
+            className="btn sm primary"
+            onClick={onClose}
+            title="Done with crop & rotate — return to editing tools"
+          >
+            Done
+          </button>
+        </div>
+      )}
 
       <div className="shape-panel__row">
         <button
@@ -248,7 +276,18 @@ export default function MapShapePanel({
         <button type="button" className="btn warn" disabled={!canUndo || working} onClick={undo}>
           Undo last apply
         </button>
-        <span className="shape-panel__value">Undo restores the version before the last Apply.</span>
+        <button
+          type="button"
+          className="btn"
+          disabled={working}
+          onClick={onClose}
+          title="Exit crop & rotate mode"
+        >
+          {result ? 'Done (Exit)' : cropDoesSomething || rotateDeg ? 'Cancel & Exit' : 'Exit crop & rotate'}
+        </button>
+        <span className="shape-panel__value">
+          {canUndo ? 'Undo restores the version before the last Apply.' : ''}
+        </span>
       </div>
     </div>
   );
