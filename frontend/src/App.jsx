@@ -12,6 +12,9 @@ import { useRobotReadiness } from './hooks/useRobotReadiness';
 import { useRunstop } from './hooks/useRunstop';
 import rosConnectionManager from './ros/rosConnectionManager';
 
+// Modes that launch robot processes; unavailable while disconnected.
+const ROBOT_MODES = ['mapping', 'navigation'];
+
 const MODES = [
   {
     id: 'mapping',
@@ -66,9 +69,12 @@ export default function App() {
   const [statusOpen, setStatusOpen] = useState(false);
 
   const active = status?.active_mode;
+  // null until the first /api/status: neither connected nor disconnected yet.
+  const connected = status ? status.robot_connected !== false : null;
+  const [toggling, setToggling] = useState(false);
 
-  // One readiness poller for the whole app, always running.
-  const { readiness, refresh, home, stow } = useRobotReadiness();
+  // One readiness poller for the whole app, running while connected.
+  const { readiness, refresh, home, stow } = useRobotReadiness({ enabled: connected === true });
   const runstop = useRunstop({ readiness, refresh, onError: setError });
 
   const robot = useMemo(
@@ -95,6 +101,10 @@ export default function App() {
   }, [refreshStatus]);
 
   useEffect(() => {
+    if (!connected) {
+      setRosOk(false);
+      return undefined;
+    }
     let cancelled = false;
     (async () => {
       try {
@@ -107,7 +117,35 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [rosbridgeUrl]);
+  }, [rosbridgeUrl, connected]);
+
+  // Nothing on the robot pages works disconnected.
+  useEffect(() => {
+    if (connected === false && ROBOT_MODES.includes(page)) setPage('home');
+  }, [connected, page]);
+
+  const toggleConnection = async () => {
+    setError('');
+    setToggling(true);
+    try {
+      await api('/api/robot/connection', {
+        method: 'POST',
+        body: JSON.stringify({ connected: !connected }),
+      });
+      await refreshStatus();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setToggling(false);
+    }
+  };
+
+  const blockers = status?.connection_blockers || [];
+  const toggleTitle = blockers.length
+    ? `Stop first: ${blockers.join('; ')}. The robot can only be connected or disconnected between runs.`
+    : connected
+      ? 'Connected: this app runs rosbridge and the mapping / navigation stacks. Disconnect to leave the robot to other apps (e.g. web teleop) and only edit maps.'
+      : 'Disconnected: this app runs nothing on the robot; only Edit Map works. Connect to map or navigate.';
 
   const enterMode = async (modeId) => {
     setError('');
@@ -154,7 +192,8 @@ export default function App() {
               key={m.id}
               type="button"
               className={`mode-btn ${page === m.id ? 'active' : ''} ${active === m.id ? 'running' : ''}`}
-              disabled={busy}
+              disabled={busy || (connected === false && ROBOT_MODES.includes(m.id))}
+              title={connected === false && ROBOT_MODES.includes(m.id) ? 'Connect to the robot first.' : undefined}
               onClick={() => enterMode(m.id)}
             >
               {m.label}
@@ -167,31 +206,53 @@ export default function App() {
             Stop mode
           </button>
         </nav>
-        <RunstopButton
-          engaged={runstop.engaged}
-          pending={runstop.pending}
-          onEngage={runstop.engage}
-          onRelease={runstop.release}
-        />
-        <RobotStatusPanel
-          readiness={readiness}
-          runstop={runstop}
-          onRefresh={refresh}
-          open={statusOpen}
-          onOpenChange={setStatusOpen}
-        />
-        <ActionsMenu
-          readiness={readiness}
-          onHome={home}
-          onStow={stow}
-          onRefresh={refresh}
-          onError={setError}
-          activeMode={active || null}
-          open={actionsOpen}
-          onOpenChange={setActionsOpen}
-        />
+        <button
+          type="button"
+          role="switch"
+          aria-checked={!!connected}
+          className={`link-switch ${connected ? 'link-switch--on' : ''}`}
+          disabled={connected === null || toggling || blockers.length > 0}
+          title={toggleTitle}
+          onClick={toggleConnection}
+        >
+          <span className="link-switch__track" aria-hidden="true">
+            <span className="link-switch__knob" />
+          </span>
+          <span className="link-switch__label">
+            {toggling
+              ? connected ? 'Disconnecting…' : 'Connecting…'
+              : connected ? 'Robot connected' : 'Robot disconnected'}
+          </span>
+        </button>
+        {connected && (
+          <>
+            <RunstopButton
+              engaged={runstop.engaged}
+              pending={runstop.pending}
+              onEngage={runstop.engage}
+              onRelease={runstop.release}
+            />
+            <RobotStatusPanel
+              readiness={readiness}
+              runstop={runstop}
+              onRefresh={refresh}
+              open={statusOpen}
+              onOpenChange={setStatusOpen}
+            />
+            <ActionsMenu
+              readiness={readiness}
+              onHome={home}
+              onStow={stow}
+              onRefresh={refresh}
+              onError={setError}
+              activeMode={active || null}
+              open={actionsOpen}
+              onOpenChange={setActionsOpen}
+            />
+          </>
+        )}
         <div className="status-pill">
-          <span><span className={`dot ${rosOk ? 'on' : 'off'}`} /> rosbridge</span>
+          {connected && <span><span className={`dot ${rosOk ? 'on' : 'off'}`} /> rosbridge</span>}
           <span
             className="dongle-status"
             title={status?.dongle_connected ? 'Gamepad dongle connected' : 'Gamepad dongle not detected'}
@@ -226,7 +287,14 @@ export default function App() {
               </p>
               <div className="home-cards">
                 {MODES.map((m) => (
-                  <button key={m.id} type="button" className="home-card" disabled={busy} onClick={() => enterMode(m.id)}>
+                  <button
+                    key={m.id}
+                    type="button"
+                    className="home-card"
+                    disabled={busy || (connected === false && ROBOT_MODES.includes(m.id))}
+                    title={connected === false && ROBOT_MODES.includes(m.id) ? 'Connect to the robot first (switch in the header).' : undefined}
+                    onClick={() => enterMode(m.id)}
+                  >
                     <span className="home-card__step">{m.step}</span>
                     <h3>{m.label}</h3>
                     <p>{m.description}</p>

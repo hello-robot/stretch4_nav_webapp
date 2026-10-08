@@ -36,8 +36,13 @@ from stretch4_nav_webapp.maps_api import (
     save_semantic_regions,
 )
 from stretch4_nav_webapp.modes.base import ModeContext, get_mode, list_modes
+from stretch4_nav_webapp.dock_discovery import DockDiscovery
+from stretch4_nav_webapp.docks import delete_dock, load_dock, save_dock
 from stretch4_nav_webapp.nav_actions import (
+    cancel_docking,
     cancel_navigate_to_pose,
+    dock_robot,
+    dock_status,
     send_navigate_to_pose,
     set_initial_pose,
     undock_robot,
@@ -50,6 +55,7 @@ from stretch4_nav_webapp.process_manager import (
     stretch_body_server_cmd,
 )
 from stretch4_nav_webapp.robot_assets import resolve_mesh_path, rewrite_urdf_mesh_urls
+from stretch4_nav_webapp.robot_link import ROBOT_MODES, RobotLink
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +181,10 @@ class ModeStartBody(BaseModel):
     skip_readiness: bool = False
 
 
+class ConnectionBody(BaseModel):
+    connected: bool
+
+
 class RunstopBody(BaseModel):
     engaged: bool
 
@@ -229,6 +239,13 @@ class TransformBody(BaseModel):
     rotate_deg: float = 0.0
 
 
+class DockBody(BaseModel):
+    # docking_station_link in the map frame: -y points out of the wall.
+    x: float
+    y: float
+    yaw: float = 0.0
+
+
 class GoalBody(BaseModel):
     x: float
     y: float
@@ -247,6 +264,7 @@ def create_app(
     config: Optional[dict] = None,
     maps_dir: Optional[Path] = None,
     process_manager: Optional[ProcessManager] = None,
+    robot_link: Optional[RobotLink] = None,
 ) -> FastAPI:
     config = config or load_config()
     maps_root = Path(maps_dir) if maps_dir else (
@@ -267,6 +285,17 @@ def create_app(
     app.state.maps_dir = maps_root
     app.state.pm = pm
     app.state.ctx = ctx
+    # Bound once the camera helpers below exist; Find dock hands the head
+    # camera back to the camera panel through it.
+    discovery = DockDiscovery(pm, maps_root, config, restore_camera=lambda: _start_camera())
+    link = robot_link or RobotLink.assume_connected(pm, config)
+    app.state.robot_link = link
+
+    def _require_connected() -> None:
+        if not link.connected:
+            raise HTTPException(
+                409, "The app is disconnected from the robot. Connect it from the header first."
+            )
 
     @app.get("/api/health")
     def health():
@@ -285,17 +314,40 @@ def create_app(
             "ui_port": config.get("ui_port", 8080),
             "dongle_connected": dongle_connected(),
             "modes": list_modes(),
+            **link.status(),
             **pm.status(),
         }
+
+    @app.get("/api/robot/connection")
+    def robot_connection():
+        return link.status()
+
+    @app.post("/api/robot/connection")
+    def set_robot_connection(body: ConnectionBody):
+        """Connect to / disconnect from the robot. Only between runs, never mid-run."""
+        blockers = link.blockers()
+        if blockers and body.connected != link.connected:
+            raise HTTPException(
+                409, "Stop the robot first: " + "; ".join(blockers) + "."
+            )
+        if body.connected:
+            link.connect()
+        else:
+            link.disconnect()
+        return link.status()
 
     @app.get("/api/robot/readiness")
     def robot_readiness():
         from stretch4_nav_webapp.robot_status import get_readiness
 
+        if not link.connected:
+            # Nothing is asked of the robot while disconnected.
+            return {"server_ok": False, "disconnected": True, "error": "Disconnected from the robot"}
         return get_readiness()
 
     @app.post("/api/robot/home")
     def robot_home():
+        _require_connected()
         from stretch4_nav_webapp.robot_status import start_home
 
         try:
@@ -305,6 +357,7 @@ def create_app(
 
     @app.post("/api/robot/stow")
     def robot_stow():
+        _require_connected()
         from stretch4_nav_webapp.robot_status import start_stow
 
         try:
@@ -334,6 +387,7 @@ def create_app(
         manager only when the app starts them, so stop_mode() leaves a system-wide
         gamepad alone.
         """
+        _require_connected()
         body_server_started = False
         body_cmd = stretch_body_server_cmd()
         if body_cmd and Path(body_cmd).is_file() and not process_running("stretch_body_server"):
@@ -403,6 +457,17 @@ def create_app(
 
         threading.Thread(target=worker, daemon=True, name="camera-post-start").start()
 
+    def _start_camera() -> None:
+        cam = _camera_config()
+        mp = pm.processes.get("camera")
+        if mp and mp.running:
+            return
+        for i, launch in enumerate(cam["launches"]):
+            name = "camera" if i == 0 else f"camera:{i}"
+            pm.start(name, shlex.split(launch))
+        if cam["post_start"]:
+            _run_camera_post_start(cam["post_start"])
+
     def _camera_proc_names() -> list[str]:
         return [n for n in pm.processes if n == "camera" or n.startswith("camera:")]
 
@@ -422,16 +487,13 @@ def create_app(
 
     @app.post("/api/camera/start")
     def camera_start():
-        cam = _camera_config()
-        if not cam["launches"]:
+        _require_connected()
+        if discovery.running():
+            # Both would open the same head camera device.
+            raise HTTPException(409, "The head camera is busy finding the dock. Try again when that is done.")
+        if not _camera_config()["launches"]:
             raise HTTPException(400, "No camera launch configured (config key: camera.launches)")
-        mp = pm.processes.get("camera")
-        if not (mp and mp.running):
-            for i, launch in enumerate(cam["launches"]):
-                name = "camera" if i == 0 else f"camera:{i}"
-                pm.start(name, shlex.split(launch))
-            if cam["post_start"]:
-                _run_camera_post_start(cam["post_start"])
+        _start_camera()
         return camera_status()
 
     @app.post("/api/camera/stop")
@@ -451,6 +513,8 @@ def create_app(
         mode = get_mode(mode_id)
         if not mode:
             raise HTTPException(404, f"Unknown mode: {mode_id}")
+        if mode_id in ROBOT_MODES:
+            _require_connected()
         try:
             kwargs: dict[str, Any] = {}
             if body.map_name is not None:
@@ -474,6 +538,7 @@ def create_app(
 
     @app.post("/api/mapping/save")
     def mapping_save(body: SaveMapBody):
+        _require_connected()
         try:
             return save_map_from_slam(maps_root, body.name)
         except Exception as exc:
@@ -588,8 +653,24 @@ def create_app(
                 loc["id"] = f"loc_{i}_{loc['name']}"
         return {"locations": save_locations(maps_root, name, locs)}
 
+    @app.get("/api/maps/{name}/dock")
+    def get_dock(name: str):
+        return {"dock": load_dock(maps_root, name)}
+
+    @app.put("/api/maps/{name}/dock")
+    def put_dock(name: str, body: DockBody):
+        try:
+            return {"dock": save_dock(maps_root, name, body.x, body.y, body.yaw)}
+        except FileNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.delete("/api/maps/{name}/dock")
+    def remove_dock(name: str):
+        return {"dock": delete_dock(maps_root, name)}
+
     @app.post("/api/navigation/goal")
     def nav_goal(body: GoalBody):
+        _require_connected()
         try:
             return send_navigate_to_pose(body.x, body.y, body.yaw, body.frame_id)
         except Exception as exc:
@@ -598,26 +679,89 @@ def create_app(
 
     @app.post("/api/navigation/cancel")
     def nav_cancel():
+        # Cancel stops the robot whatever it is doing, a dock / undock included.
         try:
-            return cancel_navigate_to_pose()
+            docking = cancel_docking()
+            res = cancel_navigate_to_pose()
         except Exception as exc:
             raise HTTPException(503, str(exc)) from exc
+        return {**res, "cancelled": bool(res.get("cancelled") or docking.get("cancelled"))}
 
     @app.post("/api/navigation/initial_pose")
     def nav_initial_pose(body: GoalBody):
+        _require_connected()
         try:
             return set_initial_pose(body.x, body.y, body.yaw)
         except Exception as exc:
             logger.exception("initial pose failed")
             raise HTTPException(503, str(exc)) from exc
 
+    def _on_dock() -> Optional[bool]:
+        """The dock contacts are powered (adapter_voltage_present), or None if unknown."""
+        from stretch4_nav_webapp.robot_status import get_readiness
+
+        try:
+            return get_readiness().get("plugged_in")
+        except Exception:  # noqa: BLE001 - no reading is not a reason to refuse
+            return None
+
+    @app.post("/api/navigation/dock")
+    def nav_dock():
+        _require_connected()
+        map_name = ctx.extras.get("nav_map_name")
+        if pm.active_mode != "navigation" or not map_name:
+            raise HTTPException(409, "Start navigation before docking")
+        dock = load_dock(maps_root, map_name)
+        if not dock:
+            raise HTTPException(
+                409, f"No dock is marked on map '{map_name}'. Mark the dock on the map first."
+            )
+        # The docking server only short-circuits when the charger is CHARGING; on
+        # a dock whose charger is idle it would drive off and dock all over again.
+        if _on_dock() is True:
+            return {"ok": True, "action": "dock", "started": False, "message": "Already on the dock."}
+        try:
+            return dock_robot(dock["x"], dock["y"], dock["yaw"])
+        except Exception as exc:
+            logger.exception("dock failed")
+            raise HTTPException(503, str(exc)) from exc
+
     @app.post("/api/navigation/undock")
     def nav_undock():
+        _require_connected()
+        if _on_dock() is False:
+            return {"ok": True, "action": "undock", "started": False, "message": "Not on the dock."}
         try:
             return undock_robot()
         except Exception as exc:
             logger.exception("undock failed")
             raise HTTPException(503, str(exc)) from exc
+
+    @app.post("/api/navigation/dock/discover/start")
+    def nav_discover_start():
+        _require_connected()
+        map_name = ctx.extras.get("nav_map_name")
+        if pm.active_mode != "navigation" or not map_name:
+            raise HTTPException(409, "Start navigation before looking for the dock")
+        # The camera panel's driver holds the same head camera device: stop it
+        # now, and the session restarts it when it ends.
+        camera = pm.processes.get("camera")
+        camera_was_on = bool(camera and camera.running)
+        for name in _camera_proc_names():
+            pm.stop(name)
+        return discovery.start(map_name, camera_was_on=camera_was_on)
+
+    @app.post("/api/navigation/dock/discover/stop")
+    def nav_discover_stop():
+        return discovery.stop()
+
+    @app.get("/api/navigation/dock/discover")
+    def nav_discover_status():
+        return discovery.status()
+
+    @app.get("/api/navigation/dock/status")
+    def nav_dock_status():
+        return dock_status()
 
     @app.get("/api/robot/meshes/{full_path:path}")
     def robot_mesh(full_path: str, v: str = ""):
@@ -638,6 +782,17 @@ def create_app(
             )
         host = "/api/robot/meshes"
         return {"urdf": rewrite_urdf_mesh_urls(urdf, host), "raw": True}
+
+    @app.get("/api/robot/dock/description")
+    def dock_description():
+        """The charging dock's URDF (stretch4_urdf's docking_station accessory)."""
+        try:
+            from stretch4_urdf import get_accessory
+
+            urdf = get_accessory("docking_station")
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(404, f"docking_station URDF unavailable: {exc}") from exc
+        return {"urdf": rewrite_urdf_mesh_urls(urdf, "/api/robot/meshes")}
 
     @app.post("/api/robot/rewrite-urdf")
     def rewrite_urdf(body: dict):

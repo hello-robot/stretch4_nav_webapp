@@ -3,7 +3,7 @@ import { api } from '../api';
 import { useRosTopic } from '../hooks/useRosTopic';
 import { useUrdfRobot } from '../hooks/useUrdfRobot';
 import PreflightScreen from '../components/PreflightScreen';
-import MapViewer from '../components/MapViewer';
+import MapViewer, { dockYawFromFacing } from '../components/MapViewer';
 import CameraPanel from '../components/CameraPanel';
 import {
   lookupPose,
@@ -23,6 +23,7 @@ const TOOLS = [
 const TOOL_HINT = {
   initial: 'Click-drag on the map where the robot actually is; the arrow sets its facing.',
   location: 'Placing a location — click-drag on the map.',
+  dock: 'Placing the dock — click-drag on the map.',
   goal: 'The map is armed for Set goal.',
   view: 'Pan: left-drag to move the map, scroll to zoom. Neither of these moves the robot.',
 };
@@ -30,6 +31,7 @@ const TOOL_HINT = {
 const LAYERS = [
   { key: 'map', label: 'Map', title: 'The saved occupancy map you started with.' },
   { key: 'robot', label: 'Robot', title: 'The 3D Stretch model at its current pose.' },
+  { key: 'dock', label: 'Dock', title: 'The charging dock marked on this map.' },
   { key: 'scan', label: 'Laser scan', title: 'Live lidar hits — what the robot can see right now.' },
   { key: 'globalCostmap', label: 'Global costmap', title: 'Where Nav2 thinks it is expensive or unsafe to drive, across the whole map.' },
   { key: 'localCostmap', label: 'Local costmap', title: 'Obstacles right around the robot, updated live.' },
@@ -53,6 +55,26 @@ function poseFromXYYaw(pose) {
     position: { x: pose.x, y: pose.y, z: 0 },
     orientation: orientationFromYaw(pose.yaw ?? 0),
   };
+}
+
+// /api/navigation/dock/status state -> .cp-goal-status look.
+const DOCK_STATUS_LOOK = {
+  active: 'driving',
+  cancelling: 'cancelling',
+  cancelled: 'cancelled',
+  succeeded: 'reached',
+  failed: 'failed',
+};
+const DOCK_ACTIVE = ['active', 'cancelling'];
+
+function dockStatusText(task) {
+  if (!task) return '';
+  if (task.state === 'active') {
+    if (task.action === 'undock') return 'Undocking…';
+    return `${task.phase || 'Starting to dock'}…`;
+  }
+  if (task.state === 'cancelling') return 'Cancelling — the robot is stopping…';
+  return task.message || '';
 }
 
 async function fetchRobotDescription() {
@@ -94,7 +116,18 @@ export default function NavigationPage({
   const [robotFormOpen, setRobotFormOpen] = useState(false);
   const [robotName, setRobotName] = useState('');
   const [initialPoseMarker, setInitialPoseMarker] = useState(null); // brief set-pose confirm
-  const [undocking, setUndocking] = useState(false);
+
+  // Charging dock: the one marked on this map, placing a new one, and the
+  // dock / undock request in flight (polled from the backend).
+  const [dock, setDock] = useState(null); // { id, x, y, yaw, source }
+  const [dockXml, setDockXml] = useState('');
+  const [placingDock, setPlacingDock] = useState(false);
+  const [pendingDock, setPendingDock] = useState(null); // { x, y, yaw } dropped on map
+  const [dockTask, setDockTask] = useState(null); // /api/navigation/dock/status
+  const [dockRequesting, setDockRequesting] = useState(false);
+  // "Find dock": park near the dock, localize, then discover_dock finds it.
+  const [findOpen, setFindOpen] = useState(false);
+  const [discovery, setDiscovery] = useState(null); // /api/navigation/dock/discover
 
   // First-run card over the map. Session-only: retired when the user sets a
   // pose or closes it; every fresh navigation launch shows it again while
@@ -111,6 +144,7 @@ export default function NavigationPage({
 
   const [showMap, setShowMap] = useState(true);
   const [showRobot, setShowRobot] = useState(true);
+  const [showDock, setShowDock] = useState(true);
   const [showScan, setShowScan] = useState(true);
   const [showGlobalCostmap, setShowGlobalCostmap] = useState(true);
   const [showLocalCostmap, setShowLocalCostmap] = useState(true);
@@ -253,6 +287,14 @@ export default function NavigationPage({
     return poseToXYYaw(lookupPose(tfMsg, frame));
   }, [footprint, tfMsg]);
   const { robot: urdfRobot } = useUrdfRobot(urdfXml, showRobot);
+
+  useEffect(() => {
+    if (!live || dockXml) return;
+    api('/api/robot/dock/description')
+      .then((res) => setDockXml(res?.urdf || ''))
+      .catch(() => {}); // no model: the viewer falls back to a plain marker
+  }, [live, dockXml]);
+  const { robot: dockModel } = useUrdfRobot(dockXml, showDock);
 
   // Robot systems health. Everything that failed silently during bring-up on a
   // real robot (driver not publishing, lidar dead, never localized) surfaces
@@ -450,13 +492,58 @@ export default function NavigationPage({
     }
     (async () => {
       try {
-        const res = await api(`/api/maps/${encodeURIComponent(mapName)}/locations`);
-        setLocations(res.locations || []);
+        const [locs, dockRes] = await Promise.all([
+          api(`/api/maps/${encodeURIComponent(mapName)}/locations`),
+          api(`/api/maps/${encodeURIComponent(mapName)}/dock`),
+        ]);
+        setLocations(locs.locations || []);
+        setDock(dockRes.dock || null);
       } catch (err) {
         onError?.(err.message);
       }
     })();
   }, [mapName, navActive]);
+
+  // Follow a dock / undock while it runs. Also picks up one already running
+  // when the page is reloaded mid-dock.
+  const dockActive = DOCK_ACTIVE.includes(dockTask?.state);
+  const refreshDockTask = async () => {
+    try {
+      setDockTask(await api('/api/navigation/dock/status'));
+    } catch {
+      // keep the last known state on a transient error
+    }
+  };
+  useEffect(() => {
+    if (!live) {
+      setDockTask(null);
+      return undefined;
+    }
+    refreshDockTask();
+    return undefined;
+  }, [live]);
+  useEffect(() => {
+    if (!live || !dockActive) return undefined;
+    const t = setInterval(refreshDockTask, 1000);
+    return () => clearInterval(t);
+  }, [live, dockActive]);
+
+  const discovering = !!discovery?.running;
+  const refreshDiscovery = async () => {
+    try {
+      const res = await api('/api/navigation/dock/discover');
+      setDiscovery(res);
+      // Show what it found on the map, unsaved, until the user keeps or drops it.
+      if (res?.found) setPendingDock({ x: res.found.x, y: res.found.y, yaw: res.found.yaw });
+    } catch {
+      // keep the last known state on a transient error
+    }
+  };
+  useEffect(() => {
+    if (!live || !discovering) return undefined;
+    const t = setInterval(refreshDiscovery, 1000);
+    return () => clearInterval(t);
+  }, [live, discovering]);
 
   useEffect(() => {
     if (!selectedMap?.keepout_painted) setUseKeepout(false);
@@ -514,6 +601,11 @@ export default function NavigationPage({
       setClickMode('view');
       setPlacing(false);
       setPendingLocation(null);
+      setPlacingDock(false);
+      setPendingDock(null);
+      setDockTask(null);
+      setFindOpen(false);
+      setDiscovery(null);
       await onStatusRefresh?.();
     } catch (err) {
       onError?.(err.message);
@@ -539,29 +631,40 @@ export default function NavigationPage({
     }
   };
 
+  // Also stops a dock / undock: the backend cancels whichever is running.
   const cancelGoal = async () => {
-    setGoalFeedback('cancelling');
+    const wasDocking = dockActive;
+    if (!wasDocking) setGoalFeedback('cancelling');
     try {
       const res = await api('/api/navigation/cancel', { method: 'POST', body: '{}' });
       setGoalPose(null);
-      setGoalFeedback(res?.cancelled ? 'cancelled' : null);
+      if (!wasDocking) setGoalFeedback(res?.cancelled ? 'cancelled' : null);
     } catch (err) {
       setGoalFeedback(null);
       onError?.(err.message);
     }
+    if (wasDocking) refreshDockTask();
   };
 
-  const undock = async () => {
-    if (undocking) return;
-    setUndocking(true);
+  // action: 'dock' | 'undock'. Both run on stretch_nav2's docking servers.
+  const runDockAction = async (action) => {
+    if (dockRequesting || dockActive) return;
+    setDockRequesting(true);
     try {
-      await api('/api/navigation/undock', { method: 'POST', body: '{}' });
+      const res = await api(`/api/navigation/${action}`, { method: 'POST', body: '{}' });
+      if (res?.started === false) {
+        // Already where it was asked to be — nothing was sent.
+        flashNotice(res.message);
+        return;
+      }
       setGoalPose(null);
-      flashNotice('Undock complete');
+      setGoalFeedback(null);
+      setDockTask({ action, state: 'active', phase: null, message: '' });
     } catch (err) {
       onError?.(err.message);
+      refreshDockTask();
     } finally {
-      setUndocking(false);
+      setDockRequesting(false);
     }
   };
 
@@ -592,6 +695,10 @@ export default function NavigationPage({
       // Drop / adjust a location; the name + save happen in the side panel.
       setPendingLocation({ x: pose.x, y: pose.y, yaw: pose.yaw ?? 0 });
     }
+    if (pose.mode === 'dock') {
+      // The drag is the way the dock faces; the stored pose is the dock's own frame.
+      setPendingDock({ x: pose.x, y: pose.y, yaw: dockYawFromFacing(pose.yaw ?? 0) });
+    }
   };
 
   const persistLocations = async (next) => {
@@ -614,6 +721,8 @@ export default function NavigationPage({
     setPlacing(false);
     setPendingLocation(null);
     setPendingName('');
+    setPlacingDock(false);
+    setPendingDock(null);
   };
 
   // Arrow keys move through the segmented control. Unlike selectClickMode this
@@ -629,12 +738,16 @@ export default function NavigationPage({
     setPlacing(false);
     setPendingLocation(null);
     setPendingName('');
+    setPlacingDock(false);
+    setPendingDock(null);
     segRef.current?.querySelector(`[data-tool="${next.id}"]`)?.focus();
   };
 
   // "Place on map": enter placement mode; the user click-drags on the map.
   const startPlaceOnMap = () => {
     setRobotFormOpen(false);
+    setPlacingDock(false);
+    setPendingDock(null);
     setPendingLocation(null);
     setPendingName('');
     setPlacing(true);
@@ -662,6 +775,81 @@ export default function NavigationPage({
       },
     ]);
     cancelPlace();
+  };
+
+  // Marking the dock works like placing a location: drop it, adjust, Save.
+  const startPlaceDock = () => {
+    if (findOpen) closeFindDock();
+    setRobotFormOpen(false);
+    setPlacing(false);
+    setPendingLocation(null);
+    setPendingName('');
+    setPendingDock(null);
+    setPlacingDock(true);
+    setClickMode('dock');
+  };
+
+  const cancelPlaceDock = () => {
+    setPlacingDock(false);
+    setPendingDock(null);
+    setClickMode('view');
+  };
+
+  const saveDock = async () => {
+    if (!pendingDock || !mapName) return;
+    try {
+      const res = await api(`/api/maps/${encodeURIComponent(mapName)}/dock`, {
+        method: 'PUT',
+        body: JSON.stringify(pendingDock),
+      });
+      setDock(res.dock || null);
+      flashNotice('Dock saved');
+      cancelPlaceDock();
+    } catch (err) {
+      onError?.(err.message);
+    }
+  };
+
+  const openFindDock = () => {
+    cancelPlaceDock();
+    setDiscovery(null);
+    setFindOpen(true);
+  };
+
+  const startDiscovery = async () => {
+    setPendingDock(null);
+    try {
+      setDiscovery(await api('/api/navigation/dock/discover/start', { method: 'POST', body: '{}' }));
+    } catch (err) {
+      onError?.(err.message);
+    }
+  };
+
+  const closeFindDock = async () => {
+    setFindOpen(false);
+    setPendingDock(null);
+    setDiscovery(null);
+    try {
+      await api('/api/navigation/dock/discover/stop', { method: 'POST', body: '{}' });
+    } catch (err) {
+      onError?.(err.message);
+    }
+  };
+
+  const keepFoundDock = async () => {
+    await saveDock();
+    setFindOpen(false);
+    setDiscovery(null);
+  };
+
+  const removeDock = async () => {
+    if (!mapName) return;
+    try {
+      const res = await api(`/api/maps/${encodeURIComponent(mapName)}/dock`, { method: 'DELETE' });
+      setDock(res.dock || null);
+    } catch (err) {
+      onError?.(err.message);
+    }
   };
 
   // "Save robot's spot": name a location at the robot's current pose (map frame).
@@ -693,6 +881,7 @@ export default function NavigationPage({
   const layerShown = {
     map: showMap,
     robot: showRobot,
+    dock: showDock,
     scan: showScan,
     globalCostmap: showGlobalCostmap,
     localCostmap: showLocalCostmap,
@@ -704,6 +893,7 @@ export default function NavigationPage({
   const setLayer = {
     map: setShowMap,
     robot: setShowRobot,
+    dock: setShowDock,
     scan: setShowScan,
     globalCostmap: setShowGlobalCostmap,
     localCostmap: setShowLocalCostmap,
@@ -904,19 +1094,191 @@ export default function NavigationPage({
           </section>
 
           <section className="cp-sect cp-sect--moves">
-            <h3 className="cp-sect__title">Charging dock</h3>
-            <div className="cp-cmds">
+            <div className="cp-sect__head">
+              <h3 className="cp-sect__title">Charging dock</h3>
+              {readiness?.plugged_in != null && (
+                <span className="cp-sect__count">
+                  {readiness.plugged_in
+                    ? `On the dock${readiness.charging ? ' · charging' : ''}`
+                    : 'Off the dock'}
+                </span>
+              )}
+            </div>
+            <div className="cp-cmds cp-cmds--split">
               <button
                 type="button"
                 className="btn"
-                disabled={undocking}
-                title="Back the robot off its charging dock."
-                onClick={undock}
+                disabled={!dock || dockActive || dockRequesting}
+                title={
+                  dock
+                    ? 'Drive to the marked dock, line up and dock to charge.'
+                    : 'Mark the dock on the map first.'
+                }
+                onClick={() => runDockAction('dock')}
               >
-                {undocking ? 'Undocking…' : 'Undock'}
+                {dockActive && dockTask?.action === 'dock' ? 'Docking…' : 'Dock'}
+              </button>
+              <button
+                type="button"
+                className="btn"
+                disabled={dockActive || dockRequesting || readiness?.plugged_in === false}
+                title={
+                  readiness?.plugged_in === false
+                    ? 'The robot is not on the dock.'
+                    : 'Slide the robot off its charging dock.'
+                }
+                onClick={() => runDockAction('undock')}
+              >
+                {dockActive && dockTask?.action === 'undock' ? 'Undocking…' : 'Undock'}
               </button>
             </div>
-            <p className="cp-hint">Back the robot off the dock before sending it anywhere.</p>
+            {dockActive && (
+              <button
+                type="button"
+                className="btn danger block"
+                title="Stop the robot and give up on docking."
+                onClick={cancelGoal}
+              >
+                Stop {dockTask?.action === 'undock' ? 'undocking' : 'docking'}
+              </button>
+            )}
+            {dockTask && dockTask.state !== 'idle' && dockStatusText(dockTask) && (
+              <p
+                className="cp-goal-status"
+                data-state={DOCK_STATUS_LOOK[dockTask.state]}
+                role="status"
+              >
+                {dockStatusText(dockTask)}
+              </p>
+            )}
+            <p className="cp-hint">
+              {dock
+                ? 'Dock drives to the dock and lines up on its own. Undock before sending the robot anywhere.'
+                : 'Mark where the dock is on the map to enable Dock.'}
+            </p>
+
+            <div className="cp-cmds cp-cmds--split">
+              <button
+                type="button"
+                className={`btn ${findOpen ? 'selected' : ''}`}
+                title="Park the robot near the dock and let it find the dock for you."
+                onClick={openFindDock}
+              >
+                Find dock
+              </button>
+              <button
+                type="button"
+                className={`btn ${placingDock ? 'selected' : ''}`}
+                title="Click-drag on the map where the dock stands."
+                onClick={startPlaceDock}
+              >
+                {dock ? 'Move dock' : '＋ Mark dock'}
+              </button>
+            </div>
+            {dock?.source === 'map' && !findOpen && !placingDock && (
+              <button
+                type="button"
+                className="btn quiet"
+                title="Remove the dock from this map."
+                onClick={removeDock}
+              >
+                Remove dock
+              </button>
+            )}
+            {findOpen && (
+              <div className="cp-form">
+                {discovery?.found ? (
+                  <>
+                    <p className="cp-hint">
+                      Found the dock — it is shown on the map. Keep it as this map&apos;s dock?
+                    </p>
+                    <div className="cp-form__actions">
+                      <button type="button" className="btn primary" onClick={keepFoundDock}>
+                        Save dock
+                      </button>
+                      <button type="button" className="btn quiet" onClick={startDiscovery}>
+                        Look again
+                      </button>
+                      <button type="button" className="btn quiet" onClick={closeFindDock}>
+                        Discard
+                      </button>
+                    </div>
+                  </>
+                ) : discovering ? (
+                  <>
+                    <p className="cp-goal-status" data-state="driving" role="status">
+                      Looking for the dock… {Math.round(discovery.elapsed ?? 0)}s
+                    </p>
+                    <p className="cp-hint">
+                      {(discovery.elapsed ?? 0) < 45
+                        ? 'The head camera takes about 30 seconds to start.'
+                        : 'Not found yet. Check the robot is about 1 m from the dock, facing it, with the tags on the dock in view.'}
+                    </p>
+                    <div className="cp-form__actions">
+                      <button type="button" className="btn quiet" onClick={closeFindDock}>Stop</button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <ol className="cp-steps">
+                      <li>Park the robot about 1 m from the dock, facing it.</li>
+                      <li>
+                        {localized ? (
+                          'The robot is localized. If its spot on the map looks wrong, use Set pose again.'
+                        ) : (
+                          <>
+                            Tell the robot where it is:{' '}
+                            <button
+                              type="button"
+                              className="btn quiet"
+                              onClick={() => setClickMode('initial')}
+                            >
+                              Set pose
+                            </button>
+                          </>
+                        )}
+                      </li>
+                      <li>Press Start. The robot doesn&apos;t move; it looks with its lidar and head camera.</li>
+                    </ol>
+                    {discovery?.error && (
+                      <p className="cp-goal-status" data-state="failed" role="status">
+                        {discovery.error}
+                      </p>
+                    )}
+                    <div className="cp-form__actions">
+                      <button
+                        type="button"
+                        className="btn primary"
+                        disabled={!localized}
+                        title={localized ? '' : 'Set the robot\'s pose on the map first.'}
+                        onClick={startDiscovery}
+                      >
+                        Start
+                      </button>
+                      <button type="button" className="btn quiet" onClick={closeFindDock}>Cancel</button>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+            {dock?.source === 'discovered' && !placingDock && (
+              <p className="cp-hint">Found by discover_dock. Move it to save it with this map.</p>
+            )}
+            {placingDock && (
+              <div className="cp-form">
+                <p className="cp-hint">
+                  {pendingDock
+                    ? 'Adjust by click-dragging again, then Save.'
+                    : 'Click on the map where the dock stands, then drag out from the wall, the way the dock faces.'}
+                </p>
+                <div className="cp-form__actions">
+                  <button type="button" className="btn primary" disabled={!pendingDock} onClick={saveDock}>
+                    Save dock
+                  </button>
+                  <button type="button" className="btn quiet" onClick={cancelPlaceDock}>Cancel</button>
+                </div>
+              </div>
+            )}
           </section>
 
           <section className="cp-sect">
@@ -1084,6 +1446,10 @@ export default function NavigationPage({
           onPose={onPose}
           locations={locations}
           pendingLocation={pendingLocation}
+          dock={dock}
+          pendingDock={pendingDock}
+          dockModel={dockModel}
+          showDock={showDock}
           initialPoseMarker={initialPoseMarker}
         />
         {!localized && (driverHealth === 'ok' || lidarHealth === 'ok') && !poseCardDismissed &&

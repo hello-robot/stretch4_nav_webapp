@@ -24,7 +24,7 @@ class _RecordingPM:
         self.started = []
         self.active_mode = None
 
-    def set_active_mode(self, mode_id, cmd):
+    def set_active_mode(self, mode_id, cmd, **_kwargs):
         self.active_mode = mode_id
         self.started.append((mode_id, cmd))
 

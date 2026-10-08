@@ -20,7 +20,7 @@ dependencies = [
 ]
 
 [project.scripts]
-stretch-nav-webapp = "stretch4_nav_webapp.cli:main"
+stretch_nav_webapp = "stretch4_nav_webapp.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

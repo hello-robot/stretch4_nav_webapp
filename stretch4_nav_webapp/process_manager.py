@@ -99,6 +99,9 @@ class ProcessManager:
 
     processes: dict[str, ManagedProcess] = field(default_factory=dict)
     active_mode: Optional[str] = None
+    # True while stop_mode() tears a mode down, so watchers of its companions
+    # can tell "stopped with the mode" from "died on its own".
+    stopping_mode: bool = False
 
     def start(self, name: str, command: list[str], *, env: Optional[dict] = None) -> ManagedProcess:
         self.stop(name)
@@ -161,7 +164,19 @@ class ProcessManager:
         self.processes.pop(name, None)
 
     def stop_mode(self) -> None:
+        self.stopping_mode = True
+        try:
+            self._stop_mode()
+        finally:
+            self.stopping_mode = False
+
+    def _stop_mode(self) -> None:
         if self.active_mode:
+            # Companions (e.g. the docking servers) talk to the mode's stack,
+            # so they go down before it does.
+            prefix = f"mode:{self.active_mode}:"
+            for name in [n for n in self.processes if n.startswith(prefix)]:
+                self.stop(name)
             # Mode launches include stretch_driver, whose clean shutdown
             # (hardware disconnect via robot.stop()) can take tens of seconds.
             # SIGKILLing it mid-shutdown leaves the robot stack in a bad state,
@@ -181,9 +196,19 @@ class ProcessManager:
         self.stop_mode()
         self.active_mode = mode_id
 
-    def set_active_mode(self, mode_id: str, command: list[str], *, env: Optional[dict] = None) -> ManagedProcess:
+    def set_active_mode(
+        self,
+        mode_id: str,
+        command: list[str],
+        *,
+        env: Optional[dict] = None,
+        companions: Optional[dict[str, list[str]]] = None,
+    ) -> ManagedProcess:
+        """Launch a mode, plus any companion processes that live and die with it."""
         self.stop_mode()
         mp = self.start(f"mode:{mode_id}", command, env=env)
+        for name, cmd in (companions or {}).items():
+            self.start(f"mode:{mode_id}:{name}", cmd, env=env)
         self.active_mode = mode_id
         return mp
 

@@ -35,7 +35,7 @@ The web UI ships prebuilt inside the package.
 ### Run it
 
 ```bash
-stretch-nav-webapp
+stretch_nav_webapp
 ```
 
 Then open **http://\<robot-ip\>:8080** from any browser on the same network
@@ -49,7 +49,7 @@ the UI.
 
 ```bash
 pip3 install --user --upgrade hello-robot-stretch4-nav-webapp
-# then restart stretch-nav-webapp
+# then restart stretch_nav_webapp
 ```
 
 To run the code from a git checkout instead, see [Developing](#developing).
@@ -59,22 +59,36 @@ To run the code from a git checkout instead, see [Developing](#developing).
 ## CLI flags
 
 ```bash
-stretch-nav-webapp                                   # normal: UI on :8080, rosbridge on :9090
-stretch-nav-webapp --port 9000                       # serve the UI on a different port
-stretch-nav-webapp --rosbridge-port 9091             # move rosbridge
-stretch-nav-webapp --maps-dir ~/my_maps              # use a different maps folder
-stretch-nav-webapp --config ~/my_config.yaml         # use a different config file entirely
-stretch-nav-webapp --print-config-path               # where the default config lives, then exit
-stretch-nav-webapp --no-rosbridge                    # you already run rosbridge yourself
-stretch-nav-webapp --host 127.0.0.1                  # local-only, no network access
+stretch_nav_webapp                                   # normal: UI on :8080, rosbridge on :9090
+stretch_nav_webapp --port 9000                       # serve the UI on a different port
+stretch_nav_webapp --rosbridge-port 9091             # move rosbridge
+stretch_nav_webapp --maps-dir ~/my_maps              # use a different maps folder
+stretch_nav_webapp --config ~/my_config.yaml         # use a different config file entirely
+stretch_nav_webapp --print-config-path               # where the default config lives, then exit
+stretch_nav_webapp --no-rosbridge                    # you already run rosbridge yourself
+stretch_nav_webapp --disconnected                    # touch nothing on the robot: map editing only
+stretch_nav_webapp --host 127.0.0.1                  # local-only, no network access
 
 # Skip the UI and start a mode immediately:
-stretch-nav-webapp --mapping
-stretch-nav-webapp --navigation my_map_name
-stretch-nav-webapp --edit_map my_map_name
+stretch_nav_webapp --mapping
+stretch_nav_webapp --navigation my_map_name
+stretch_nav_webapp --edit_map my_map_name
 ```
 
 Flags always win over the config file.
+
+### Robot connected / disconnected
+
+The **Robot connected** switch in the header decides whether the app may run
+anything on the robot. Connected (the default), it runs its own rosbridge and the
+mapping / navigation stacks, each with its own `stretch_driver`. That collides
+with other apps driving the robot. Disconnected, the app runs nothing on the robot
+and only Edit Map works, so you can clean up a map while someone else uses the
+robot.
+
+`--disconnected` starts the app that way. The switch only works between runs:
+stop mapping, navigation first. Connecting takes the
+robot over: it stops any rosbridge on the rosbridge port.
 
 ---
 
@@ -121,9 +135,9 @@ copy, and point the app at it — that way an upgrade never overwrites your
 changes:
 
 ```bash
-cp "$(stretch-nav-webapp --print-config-path)" ~/my_config.yaml
+cp "$(stretch_nav_webapp --print-config-path)" ~/my_config.yaml
 # edit ~/my_config.yaml
-stretch-nav-webapp --config ~/my_config.yaml
+stretch_nav_webapp --config ~/my_config.yaml
 ```
 
 ---
@@ -155,8 +169,35 @@ maps/<map_name>/
   semantic.json                 The room names and colours
   binary_filter_mask.pgm + .yaml   Areas for a binary filter you launch yourself
   locations.json                Saved places you can send the robot to
+  docks.yaml                    The charging dock 
   .before_transform/            One undo step for crop & rotate
 ```
+
+---
+
+## Docking
+
+Navigation also starts stretch_nav2's `docking_server.py` and
+`undocking_server.py` (config key `docking.launches`; an empty list turns them
+off). In the Navigation panel, **Charging dock**:
+
+- **＋ Mark dock** / **Move dock**: click on the map where the dock stands and drag
+  out from the wall, the way the dock faces. The dock model is drawn there.
+- **Dock** sends a `DockRobot` goal for the marked dock. The docking server drives
+  there through Nav2, finds the dock and lines up on its own.
+- **Undock** sends an `UndockRobot` goal. The server checks there is room beside
+  the dock before it slides off.
+- **Cancel goal** or **Stop docking** cancels either one.
+
+**Find dock** lets the robot find the dock itself. Park it about 1 m from the
+dock, facing it, set its pose on the map, then press Start. The app starts the
+head camera's center socket, ArUco detection and stretch_nav2's `discover_dock`
+beside navigation. The robot doesn't move. When `discover_dock` confirms a dock
+(lidar shape plus the dock's tags), it's drawn on the map for you to save or
+discard.
+
+A map with no dock of its own picks up the one `discover_dock` saved for a map of
+the same name (`maps/docks/<map_name>_docks.yaml`). 
 
 ---
 
@@ -243,7 +284,7 @@ npm install
 npm run build                     # writes stretch4_nav_webapp/static
 cd ..
 
-stretch-nav-webapp
+stretch_nav_webapp
 ```
 
 > **The UI is served from `stretch4_nav_webapp/static`, not from
@@ -281,7 +322,7 @@ class MyMode(Mode):
 2. Import it from `stretch4_nav_webapp/modes/__init__.py` so it registers itself.
 3. Add a page and a button in `frontend/src/App.jsx` that calls
    `api('/api/modes/my_mode/start', { method: 'POST', body: '{}' })`.
-4. Rebuild the frontend and restart `stretch-nav-webapp`. The mode also shows up in
+4. Rebuild the frontend and restart `stretch_nav_webapp`. The mode also shows up in
    `GET /api/modes`.
 
 ---
@@ -302,18 +343,25 @@ The same endpoints the UI buttons use.
 - `POST /api/robot/home` · `POST /api/robot/stow` — start the routine, returns immediately
 - `POST /api/robot/runstop` `{"engaged": true|false}` — the safety stop
 - `POST /api/robot/gamepad/start`
+- `GET|POST /api/robot/connection` `{"connected": true|false}`: the header switch
 
 **Navigation**
 - `POST /api/navigation/goal` `{"x":…, "y":…, "yaw":…}`
 - `POST /api/navigation/cancel`
 - `POST /api/navigation/initial_pose` — tell the robot where it is
-- `POST /api/navigation/undock`
+- `POST /api/navigation/dock` · `POST /api/navigation/undock`: start a dock / undock,
+  returns immediately
+- `GET /api/navigation/dock/status`: what the dock / undock is doing
+- `POST /api/navigation/dock/discover/start` · `.../stop` · `GET /api/navigation/dock/discover`:
+  Find dock
 
 **Maps**
 - `POST /api/mapping/save` `{"name": "..."}`
 - `GET /api/maps`
 - `GET|POST /api/maps/{name}/layer/{occupancy|keepout|speed|semantic|binary}`
 - `GET|PUT /api/maps/{name}/locations`
+- `GET|PUT|DELETE /api/maps/{name}/dock`: `{"x":…, "y":…, "yaw":…}`, the dock's
+  `docking_station_link` pose in the map frame
 - `GET|PUT /api/maps/{name}/semantic` — room names/colours
 - `GET|POST /api/maps/{name}/transform` · `POST /api/maps/{name}/transform/undo`
 

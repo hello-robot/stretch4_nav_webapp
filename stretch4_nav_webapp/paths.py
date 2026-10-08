@@ -38,6 +38,11 @@ def locations_path(maps_root: Path, name: str) -> Path:
     return map_dir(maps_root, name) / "locations.json"
 
 
+def dock_path(maps_root: Path, name: str) -> Path:
+    """The charging dock marked on this map (see docks.py)."""
+    return map_dir(maps_root, name) / "docks.yaml"
+
+
 def semantic_json_path(maps_root: Path, name: str) -> Path:
     """Region id -> name/colour table for the semantic layer."""
     return map_dir(maps_root, name) / "semantic.json"

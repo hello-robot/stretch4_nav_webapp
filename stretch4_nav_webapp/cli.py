@@ -1,14 +1,11 @@
-"""CLI entrypoint: stretch-nav-webapp"""
+"""CLI entrypoint: stretch_nav_webapp"""
 
 from __future__ import annotations
 
 import argparse
 import logging
 import os
-import re
 import shlex
-import signal
-import subprocess
 import sys
 import threading
 import time
@@ -23,15 +20,15 @@ from stretch4_nav_webapp.app import (
     create_app,
     load_config,
 )
-from stretch4_nav_webapp.modes.base import shlex_split_launch
 from stretch4_nav_webapp.paths import default_maps_dir
 from stretch4_nav_webapp.process_manager import ProcessManager, _load_robot_env
+from stretch4_nav_webapp.robot_link import RobotLink
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
-logger = logging.getLogger("stretch-nav-webapp")
+logger = logging.getLogger("stretch_nav_webapp")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -50,6 +47,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "(copy it, edit the copy, pass it with --config)",
     )
     p.add_argument("--no-rosbridge", action="store_true", help="Do not start rosbridge")
+    p.add_argument(
+        "--disconnected",
+        action="store_true",
+        help="Start disconnected from the robot: no rosbridge, no robot processes, "
+        "only map editing (connect later from the header switch)",
+    )
     p.add_argument(
         "--mapping",
         action="store_true",
@@ -154,126 +157,7 @@ def _ensure_robot_ros_env() -> None:
         f'exec {shlex.quote(sys.executable)} -m stretch4_nav_webapp.cli "$@"'
     )
     logger.info("rclpy not importable — re-executing under a ROS-sourced shell")
-    os.execvp("bash", ["bash", "-c", script, "stretch-nav-webapp", *sys.argv[1:]])
-
-
-def _pgid_alive(pgid: int) -> bool:
-    try:
-        os.killpg(pgid, 0)
-        return True
-    except OSError:
-        return False
-
-
-def _stop_orphan_mode_launches() -> None:
-    """Stop mode launches left behind by a previous backend that died.
-
-    Mode launches run in their own process groups (setsid), so they outlive a
-    crashed backend. A fresh backend would then report mode=idle while a stale
-    nav2/slam stack is still driving the robot, and starting a mode would put
-    two stacks on the hardware at once.
-
-    Only true orphans are touched: a launch whose spawning backend died has
-    been reparented to init (PPID 1). A launch whose parent is alive belongs
-    to a running backend — a second ``stretch-nav-webapp`` (which will fail to bind
-    the port a moment later) must not shoot down the healthy one's stack.
-    """
-    patterns = ("launch stretch_nav2",)
-    pgids: set[int] = set()
-    for proc in Path("/proc").iterdir():
-        if not proc.name.isdigit():
-            continue
-        try:
-            cmdline = (
-                (proc / "cmdline")
-                .read_bytes()
-                .replace(b"\0", b" ")
-                .decode(errors="replace")
-            )
-            if "ros2" not in cmdline or not any(p in cmdline for p in patterns):
-                continue
-            stat_fields = (proc / "stat").read_text().rsplit(") ", 1)[1].split()
-            ppid = int(stat_fields[1])  # field 4 of /proc/pid/stat
-            if ppid != 1:
-                continue  # parent alive — owned by a running backend
-            pgid = os.getpgid(int(proc.name))
-        except (OSError, ValueError, IndexError):
-            continue
-        if pgid != os.getpgid(0):
-            pgids.add(pgid)
-    if not pgids:
-        return
-
-    logger.warning("Stopping orphaned mode launches: pgids=%s", sorted(pgids))
-    for pgid in pgids:
-        try:
-            os.killpg(pgid, signal.SIGINT)
-        except OSError:
-            pass
-    # The driver's clean shutdown (hardware disconnect) can take tens of
-    # seconds; give ros2 launch room to escalate on its own before we do.
-    deadline = time.time() + 30
-    while time.time() < deadline and any(_pgid_alive(p) for p in pgids):
-        time.sleep(0.5)
-    for pgid in pgids:
-        if _pgid_alive(pgid):
-            try:
-                os.killpg(pgid, signal.SIGKILL)
-            except OSError:
-                pass
-
-
-def _rosbridge_pids_on_port(port: int) -> list[int]:
-    try:
-        result = subprocess.run(
-            ["ss", "-ltnp"],
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-    except Exception:
-        return []
-
-    pids: set[int] = set()
-    for line in result.stdout.splitlines():
-        if f":{port} " not in line and f":{port}\t" not in line:
-            continue
-        for pid_text in re.findall(r"pid=(\d+)", line):
-            pid = int(pid_text)
-            try:
-                cmdline = Path(f"/proc/{pid}/cmdline").read_text(encoding="utf-8")
-            except OSError:
-                continue
-            if "rosbridge_websocket" in cmdline or "rosbridge_server" in cmdline:
-                pids.add(pid)
-    return sorted(pids)
-
-
-def _stop_existing_rosbridge(port: int) -> None:
-    """Clear orphan rosbridge instances before starting the one owned by this CLI."""
-    pids = _rosbridge_pids_on_port(port)
-    if not pids:
-        return
-    logger.warning("Stopping existing rosbridge on port %s: pids=%s", port, pids)
-    pgids = set()
-    for pid in pids:
-        try:
-            pgids.add(os.getpgid(pid))
-        except OSError:
-            pass
-    for pgid in pgids:
-        try:
-            os.killpg(pgid, signal.SIGINT)
-        except OSError:
-            pass
-    deadline = time.time() + 4
-    while time.time() < deadline and _rosbridge_pids_on_port(port):
-        time.sleep(0.2)
-    for pid in _rosbridge_pids_on_port(port):
-        try:
-            os.killpg(os.getpgid(pid), signal.SIGKILL)
-        except OSError:
-            pass
+    os.execvp("bash", ["bash", "-c", script, "stretch_nav_webapp", *sys.argv[1:]])
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -284,7 +168,6 @@ def main(argv: list[str] | None = None) -> None:
         # Before any process handling: this is a query, not a server start.
         print(DEFAULT_CONFIG_PATH)
         return
-    _stop_orphan_mode_launches()
     config = load_config(args.config) if args.config else load_config()
 
     if args.port is not None:
@@ -304,22 +187,14 @@ def main(argv: list[str] | None = None) -> None:
     maps_dir.mkdir(parents=True, exist_ok=True)
 
     pm = ProcessManager()
+    # Connecting starts rosbridge (unless --no-rosbridge) and clears orphaned
+    # launches; disconnected, the app touches nothing on the robot.
+    connected = not args.disconnected
+    if not connected and (args.mapping or args.navigation is not None):
+        raise SystemExit("--mapping / --navigation need the robot: drop --disconnected")
+    link = RobotLink(pm, config, connected=connected, manage_rosbridge=not args.no_rosbridge)
 
-    # Start rosbridge
-    if not args.no_rosbridge:
-        rosbridge_port = int(config.get("rosbridge_port", 9090))
-        _stop_existing_rosbridge(rosbridge_port)
-        template = config["launches"]["rosbridge"]
-        cmd = shlex_split_launch(
-            template,
-            rosbridge_port=str(rosbridge_port),
-        )
-        try:
-            pm.start("rosbridge", cmd)
-        except Exception:
-            logger.exception("Failed to start rosbridge — UI may not get live topics")
-
-    app = create_app(config=config, maps_dir=maps_dir, process_manager=pm)
+    app = create_app(config=config, maps_dir=maps_dir, process_manager=pm, robot_link=link)
 
     host = config.get("host", "0.0.0.0")
     port = int(config.get("ui_port", 8080))
