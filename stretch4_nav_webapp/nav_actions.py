@@ -15,9 +15,6 @@ _node = None
 _action_client = None
 _goal_handle = None
 _initial_pose_pub = None
-_cmd_vel_pub = None
-_undocking = False
-_undock_lock = threading.Lock()
 _lock = threading.Lock()
 
 
@@ -234,65 +231,226 @@ def set_initial_pose(x: float, y: float, yaw: float = 0.0) -> dict[str, Any]:
     }
 
 
-def undock_robot(duration_sec: float = 3.0, y_velocity: float = -0.1) -> dict[str, Any]:
-    """Move sideways off the dock by publishing Twist on /cmd_vel_smoothed.
+# --- Docking -----------------------------------------------------------------
+# Docking and undocking go through stretch_nav2's docking_server.py and
+# undocking_server.py
 
-    Publishing to /cmd_vel_smoothed (not raw /cmd_vel) keeps Nav2's collision
-    monitor in the path so motion can still be stopped on obstacle detection.
+# DockRobot.Feedback.state -> what the robot is doing.
+DOCK_PHASES = {
+    1: "Driving to the dock",
+    2: "Looking for the dock",
+    3: "Lining up with the dock",
+    4: "Waiting for the charger",
+    5: "Lost sight of the dock, trying again",
+}
+
+# stretch_nav2's own error codes, beside nav2's 9xx ones (which carry error_msg).
+_STRETCH_DOCK_ERRORS = {
+    800: "Replaced by a newer dock request.",
+    801: "Could not stow the arm before docking.",
+    802: "Not enough clear space beside the dock to undock.",
+}
+
+_dock_client = None
+_undock_client = None
+_spinner_started = False
+_dock_lock = threading.Lock()
+_dock: dict[str, Any] = {
+    "action": None,  # "dock" | "undock" | None
+    "state": "idle",  # idle | active | cancelling | succeeded | failed | cancelled
+    "phase": None,
+    "message": "",
+    "handle": None,
+    "seq": 0,
+    "since": 0.0,
+}
+
+
+def _ensure_spinner() -> None:
+    """Spin the shared node in the background so action results and feedback arrive.
+
+    Every spin happens under ``_lock``, so it never overlaps the in-call
+    spinning the other helpers here do.
     """
-    global _cmd_vel_pub, _undocking
-    from geometry_msgs.msg import Twist
+    global _spinner_started
+    if _spinner_started:
+        return
+    _spinner_started = True
 
-    with _undock_lock:
-        if _undocking:
-            raise RuntimeError("undock already in progress")
-        _undocking = True
+    def run() -> None:
+        while True:
+            try:
+                with _lock:
+                    _spin_once(0.0)
+            except Exception as exc:  # noqa: BLE001 - keep spinning through a bad callback
+                logger.warning("docking spinner: %s", exc)
+            time.sleep(0.05)
+
+    threading.Thread(target=run, daemon=True, name="nav-actions-spin").start()
+
+
+def _ensure_docking_clients():
+    global _dock_client, _undock_client
+    from rclpy.action import ActionClient
+    from nav2_msgs.action import DockRobot, UndockRobot
+
+    with _lock:
+        _ensure_rclpy()
+        if _dock_client is None:
+            _dock_client = ActionClient(_node, DockRobot, "dock_robot")
+            _undock_client = ActionClient(_node, UndockRobot, "undock_robot")
+    _ensure_spinner()
+    return _dock_client, _undock_client
+
+
+def _set_dock(seq: int, **fields) -> None:
+    """Update the docking status, unless a newer request has replaced this one."""
+    with _dock_lock:
+        if _dock["seq"] == seq:
+            _dock.update(fields)
+
+
+def _result_message(action: str, result) -> str:
+    if result.success:
+        return "Docked." if action == "dock" else "Undocked."
+    code = int(result.error_code)
+    detail = (result.error_msg or "").strip() or _STRETCH_DOCK_ERRORS.get(code, "")
+    verb = "Docking" if action == "dock" else "Undocking"
+    return f"{verb} failed ({code}): {detail}" if detail else f"{verb} failed ({code})."
+
+
+def _send_dock_goal(action: str, client, goal, wait_server_sec: float) -> dict[str, Any]:
+    from action_msgs.msg import GoalStatus
+
+    name, server = (
+        ("dock_robot", "docking_server") if action == "dock" else ("undock_robot", "undocking_server")
+    )
+    if not client.wait_for_server(timeout_sec=wait_server_sec):
+        raise TimeoutError(
+            f"{name} action server not available (is stretch_nav2's {server} "
+            "running? It starts with navigation.)"
+        )
+
+    with _dock_lock:
+        if _dock["state"] in ("active", "cancelling"):
+            raise RuntimeError(f"{_dock['action']} already in progress")
+        _dock["seq"] += 1
+        seq = _dock["seq"]
+        _dock.update(
+            action=action, state="active", phase=None, message="", handle=None,
+            since=time.time(),
+        )
+
+    def on_feedback(msg) -> None:
+        phase = DOCK_PHASES.get(int(getattr(msg.feedback, "state", 0)))
+        if phase:
+            _set_dock(seq, phase=phase)
+
+    def on_result(future) -> None:
+        try:
+            wrapped = future.result()
+        except Exception as exc:  # noqa: BLE001
+            _set_dock(seq, state="failed", message=str(exc), handle=None)
+            return
+        if wrapped.status == GoalStatus.STATUS_CANCELED:
+            _set_dock(seq, state="cancelled", message="Cancelled.", handle=None)
+            return
+        result = wrapped.result
+        _set_dock(
+            seq,
+            state="succeeded" if result.success else "failed",
+            message=_result_message(action, result),
+            handle=None,
+        )
 
     try:
-        # Stop any active nav goal so the controller does not fight undock Twist.
-        try:
-            cancel_navigate_to_pose()
-        except Exception as exc:
-            logger.warning("undock: cancel goal before undock failed: %s", exc)
-
         with _lock:
-            _ensure_rclpy()
-            if _cmd_vel_pub is None:
-                # Publish to the collision_monitor's input (cmd_vel_in_topic =
-                # /cmd_vel_nav), which relays to /cmd_vel -> stretch_driver. The
-                # previous /cmd_vel_smoothed had *zero* subscribers on this robot
-                # (velocity_smoother's output is unused), so undock never moved.
-                _cmd_vel_pub = _node.create_publisher(Twist, "/cmd_vel_nav", 10)
-            pub = _cmd_vel_pub
+            send_future = client.send_goal_async(goal, feedback_callback=on_feedback)
+        deadline = time.time() + 10.0
+        while not send_future.done() and time.time() < deadline:
+            time.sleep(0.05)  # the spinner resolves it
+        if not send_future.done():
+            raise TimeoutError(f"{name} did not answer the goal request")
+        handle = send_future.result()
+        if not handle or not handle.accepted:
+            raise RuntimeError(f"{name} goal rejected")
+    except Exception as exc:
+        _set_dock(seq, state="failed", message=str(exc))
+        raise
 
-        logger.info(
-            "undock: sideways at %.3f m/s for %.1fs via /cmd_vel_nav",
-            y_velocity,
-            duration_sec,
-        )
-        twist = Twist()
-        twist.linear.x = 0.0
-        twist.linear.y = float(y_velocity)
-        twist.angular.z = 0.0
+    _set_dock(seq, handle=handle)
+    with _lock:
+        handle.get_result_async().add_done_callback(on_result)
+    return {"ok": True, "action": action, "started": True}
 
-        start = time.time()
-        while (time.time() - start) < duration_sec:
-            pub.publish(twist)
-            _spin_once(0.05)
-            time.sleep(0.1)
 
+def dock_robot(x: float, y: float, yaw: float, wait_server_sec: float = 5.0) -> dict[str, Any]:
+    """Dock on the dock at (x, y, yaw), a docking_station_link pose in the map frame.
+
+    The docking server drives there through Nav2 itself, starts looking for the
+    dock once it is close, and servos onto the charger, so no separate goal is
+    needed.
+    """
+    from nav2_msgs.action import DockRobot
+
+    client, _ = _ensure_docking_clients()
+    try:
+        cancel_navigate_to_pose()  # the server's own Nav2 goal replaces ours anyway
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("dock: cancel goal before docking failed: %s", exc)
+
+    goal = DockRobot.Goal()
+    goal.use_dock_id = False
+    goal.navigate_to_staging_pose = True
+    # Stamp left at zero, meaning "latest transform", like stretch4_patrol does.
+    goal.dock_pose.header.frame_id = "map"
+    goal.dock_pose.pose.position.x = float(x)
+    goal.dock_pose.pose.position.y = float(y)
+    q = yaw_to_quaternion(float(yaw))
+    goal.dock_pose.pose.orientation.z = q["z"]
+    goal.dock_pose.pose.orientation.w = q["w"]
+    return _send_dock_goal("dock", client, goal, wait_server_sec)
+
+
+def undock_robot(wait_server_sec: float = 5.0) -> dict[str, Any]:
+    """Slide off the dock through the undocking server, which checks the space first."""
+    from nav2_msgs.action import UndockRobot
+
+    _, client = _ensure_docking_clients()
+    try:
+        # Stop any active nav goal so the controller does not fight the undock.
+        cancel_navigate_to_pose()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("undock: cancel goal before undock failed: %s", exc)
+    return _send_dock_goal("undock", client, UndockRobot.Goal(), wait_server_sec)
+
+
+def cancel_docking(timeout_sec: float = 5.0) -> dict[str, Any]:
+    """Cancel a dock / undock in progress. A no-op when nothing is running."""
+    with _dock_lock:
+        handle = _dock["handle"]
+        seq = _dock["seq"]
+        if handle is None or _dock["state"] != "active":
+            return {"ok": True, "cancelled": False}
+        _dock["state"] = "cancelling"
+    with _lock:
+        future = handle.cancel_goal_async()
+    deadline = time.time() + timeout_sec
+    while not future.done() and time.time() < deadline:
+        time.sleep(0.05)
+    if not future.done():
+        _set_dock(seq, state="active")
+        raise TimeoutError("docking server did not answer the cancel request")
+    return {"ok": True, "cancelled": True}
+
+
+def dock_status() -> dict[str, Any]:
+    """What the last dock / undock request is doing, for the UI to poll."""
+    with _dock_lock:
         return {
-            "ok": True,
-            "duration_sec": duration_sec,
-            "y_velocity": y_velocity,
+            "action": _dock["action"],
+            "state": _dock["state"],
+            "phase": _dock["phase"],
+            "message": _dock["message"],
+            "elapsed": round(time.time() - _dock["since"], 1) if _dock["since"] else None,
         }
-    finally:
-        try:
-            if _cmd_vel_pub is not None:
-                stop = Twist()
-                _cmd_vel_pub.publish(stop)
-                _spin_once(0.05)
-        except Exception as exc:
-            logger.warning("undock: failed to publish stop Twist: %s", exc)
-        with _undock_lock:
-            _undocking = False

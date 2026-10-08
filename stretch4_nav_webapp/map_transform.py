@@ -17,7 +17,7 @@ The geometry, in one place so it can be checked:
   feature at world q ends up at c + R(q - c), where c is the world point at the
   centre of the old image and R is a CCW rotation by θ. Locations get that same
   transform (their heading gains θ), so a location painted on the kitchen door
-  is still on the kitchen door afterwards.
+  is still on the kitchen door afterwards. So does the marked charging dock.
 
 """
 
@@ -33,6 +33,7 @@ from typing import Any, Optional
 import yaml
 from PIL import Image
 
+from stretch4_nav_webapp.docks import rotate_dock
 from stretch4_nav_webapp.maps_api import (
     DEFAULT_OCCUPIED_THRESH,
     TRINARY_FREE_THRESH,
@@ -289,6 +290,9 @@ def transform_map(
                     off_map += 1
             loc_path.write_text(json.dumps(locs, indent=2) + "\n", encoding="utf-8")
 
+    # The dock is a location too: it turns with the map.
+    dock_moved = bool(rotate_deg) and rotate_dock(maps_root, name, cx, cy, theta)
+
     return {
         "ok": True,
         "name": name,
@@ -303,6 +307,7 @@ def transform_map(
         "locations_moved": moved_locations,
         "locations_off_map": off_map,
         "locations_in_removed": in_removed,
+        "dock_moved": dock_moved,
         "can_undo": True,
         "path": str(folder),
     }

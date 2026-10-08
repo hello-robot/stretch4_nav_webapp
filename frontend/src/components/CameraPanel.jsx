@@ -28,18 +28,25 @@ export default function CameraPanel({ rosbridgeUrl, onError }) {
   const [hasFrame, setHasFrame] = useState(false);
   const canvasRef = useRef(null);
 
-  // The camera may already be up (panel remounts when a mode restarts).
+  // The camera may already be up (panel remounts when a mode restarts), and
+  // the backend can stop and restart it on its own: Find dock borrows the head
+  // camera and hands it back. Keep following the backend's state.
   useEffect(() => {
     let cancelled = false;
-    api('/api/camera/status')
-      .then((s) => {
-        if (cancelled) return;
-        setCam(s);
-        setRunning(!!s.running);
-      })
-      .catch(() => {});
+    const poll = () =>
+      api('/api/camera/status')
+        .then((s) => {
+          if (cancelled) return;
+          setCam(s);
+          setRunning(!!s.running);
+          if (!s.running) setHasFrame(false);
+        })
+        .catch(() => {});
+    poll();
+    const t = setInterval(poll, 3000);
     return () => {
       cancelled = true;
+      clearInterval(t);
     };
   }, []);
 
