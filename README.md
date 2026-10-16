@@ -64,15 +64,9 @@ stretch_nav_webapp --port 9000                       # serve the UI on a differe
 stretch_nav_webapp --rosbridge-port 9091             # move rosbridge
 stretch_nav_webapp --maps-dir ~/my_maps              # use a different maps folder
 stretch_nav_webapp --config ~/my_config.yaml         # use a different config file entirely
-stretch_nav_webapp --print-config-path               # where the default config lives, then exit
 stretch_nav_webapp --no-rosbridge                    # you already run rosbridge yourself
 stretch_nav_webapp --disconnected                    # touch nothing on the robot: map editing only
 stretch_nav_webapp --host 127.0.0.1                  # local-only, no network access
-
-# Skip the UI and start a mode immediately:
-stretch_nav_webapp --mapping
-stretch_nav_webapp --navigation my_map_name
-stretch_nav_webapp --edit_map my_map_name
 ```
 
 Flags always win over the config file.
@@ -135,7 +129,7 @@ copy, and point the app at it — that way an upgrade never overwrites your
 changes:
 
 ```bash
-cp "$(stretch_nav_webapp --print-config-path)" ~/my_config.yaml
+cp "$(python3 -c 'import stretch4_nav_webapp.app as a; print(a.DEFAULT_CONFIG_PATH)')" ~/my_config.yaml
 # edit ~/my_config.yaml
 stretch_nav_webapp --config ~/my_config.yaml
 ```

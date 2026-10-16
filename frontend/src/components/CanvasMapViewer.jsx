@@ -1,4 +1,5 @@
 import { useEffect, useRef, useCallback } from 'react';
+import { rectCorners } from '../utils/rasterizeShapes';
 
 /**
  * 2D occupancy map viewer with pan/zoom and optional pose click-drag.
@@ -102,6 +103,21 @@ const CROP_CURSORS = {
   bl: 'nesw-resize',
 };
 
+// Handle directions in degrees (screen, CCW from +x), for picking a resize
+// cursor that matches a rotated rect's edge.
+const HANDLE_DIRS = { r: 0, tr: 45, t: 90, tl: 135, l: 180, bl: 225, b: 270, br: 315 };
+const DIR_CURSORS = ['ew-resize', 'nesw-resize', 'ns-resize', 'nwse-resize'];
+
+function rotatedCursor(handle, angleDeg = 0) {
+  const step = Math.round((HANDLE_DIRS[handle] + angleDeg) / 45);
+  return DIR_CURSORS[((step % 4) + 4) % 4];
+}
+
+// How far the rotate knob sits outside a selected rect's top edge.
+const ROTATE_KNOB_PX = 24;
+// Covers the knob and the arrow ring drawn round it.
+const ROTATE_KNOB_HIT_PX = 12;
+
 /**
  * Move one or two sides of the box, leaving the others where they are. Works in
  * image coordinates; `cellY` arrives counted from the bottom, so it is flipped
@@ -162,6 +178,40 @@ function resizeShapeRect(orig, handle, cell) {
   if (handle.includes('t')) y1 = Math.max(cell.cellY, y0);
   if (handle.includes('b')) y0 = Math.min(cell.cellY, y1);
   return { ...orig, x0, y0, x1, y1 };
+}
+
+/**
+ * Resize a rotated rect along its own axes, keeping the opposite side(s) in
+ * place.
+ */
+function resizeRotatedRect(orig, handle, fx, fy) {
+  const t = ((orig.angle || 0) * Math.PI) / 180;
+  const c = Math.cos(t);
+  const s = Math.sin(t);
+  const cx = (orig.x0 + orig.x1 + 1) / 2;
+  const cy = (orig.y0 + orig.y1 + 1) / 2;
+  const hw = (orig.x1 - orig.x0 + 1) / 2;
+  const hh = (orig.y1 - orig.y0 + 1) / 2;
+  // Pointer in the rect's own frame.
+  const pu = (fx - cx) * c + (fy - cy) * s;
+  const pv = -(fx - cx) * s + (fy - cy) * c;
+  let l = -hw;
+  let r = hw;
+  let b = -hh;
+  let top = hh;
+  if (handle.includes('l')) l = Math.min(pu, r - 1);
+  if (handle.includes('r')) r = Math.max(pu, l + 1);
+  if (handle.includes('t')) top = Math.max(pv, b + 1);
+  if (handle.includes('b')) b = Math.min(pv, top - 1);
+  const w = Math.max(1, Math.round(r - l));
+  const h = Math.max(1, Math.round(top - b));
+  const mu = (l + r) / 2;
+  const mv = (b + top) / 2;
+  const ncx = cx + mu * c - mv * s;
+  const ncy = cy + mu * s + mv * c;
+  const x0 = Math.round(ncx - w / 2);
+  const y0 = Math.round(ncy - h / 2);
+  return { ...orig, x0, y0, x1: x0 + w - 1, y1: y0 + h - 1 };
 }
 
 function pointInPolygon(px, py, pts) {
@@ -234,7 +284,7 @@ export default function MapViewer({
     const my = g.height - (sy - st.offsetY) / st.scale;
     const wx = g.originX + mx * g.resolution;
     const wy = g.originY + my * g.resolution;
-    return { x: wx, y: wy, cellX: Math.floor(mx), cellY: Math.floor(my) };
+    return { x: wx, y: wy, cellX: Math.floor(mx), cellY: Math.floor(my), fx: mx, fy: my };
   }, []);
 
   // The rotation preview draws the map (and crop box) through ctx.rotate about
@@ -259,6 +309,39 @@ export default function MapViewer({
     const sy = st.offsetY + (g.height - cellY) * st.scale;
     return [sx, sy];
   }, []);
+
+  // A rect shape on screen: its unrotated box about the screen centre, plus
+  // maps between that box's frame and the real (rotated) screen position.
+  // Canvas y points down, so a CCW map angle is a clockwise screen turn.
+  const rectScreenGeom = useCallback(
+    (shape, g, st) => {
+      const [scx, scy] = cellToScreen((shape.x0 + shape.x1 + 1) / 2, (shape.y0 + shape.y1 + 1) / 2, g, st);
+      const w = (shape.x1 - shape.x0 + 1) * st.scale;
+      const h = (shape.y1 - shape.y0 + 1) * st.scale;
+      const t = ((shape.angle || 0) * Math.PI) / 180;
+      const c = Math.cos(t);
+      const s = Math.sin(t);
+      const toScreen = (px, py) => {
+        const dx = px - scx;
+        const dy = py - scy;
+        return [scx + dx * c + dy * s, scy - dx * s + dy * c];
+      };
+      const fromScreen = (px, py) => {
+        const dx = px - scx;
+        const dy = py - scy;
+        return [scx + dx * c - dy * s, scy + dx * s + dy * c];
+      };
+      const rect = { x: scx - w / 2, y: scy - h / 2, w, h };
+      return {
+        rect,
+        toScreen,
+        fromScreen,
+        topMid: toScreen(scx, rect.y),
+        knob: toScreen(scx, rect.y - ROTATE_KNOB_PX),
+      };
+    },
+    [cellToScreen]
+  );
 
   const drawShapePreview = useCallback(
     (ctx, g, st) => {
@@ -540,20 +623,64 @@ export default function MapViewer({
         ctx.stroke();
         dots.push([sx, sy], [sx + rPx, sy], [sx - rPx, sy], [sx, sy + rPx], [sx, sy - rPx]);
       } else if (sel.kind === 'rect') {
-        // +1: the fill paints x0..x1 / y0..y1 inclusive.
-        const [ax, ay] = cellToScreen(sel.x0, sel.y0, primary, st);
-        const [bx, by] = cellToScreen(sel.x1 + 1, sel.y1 + 1, primary, st);
-        const x = Math.min(ax, bx);
-        const y = Math.min(ay, by);
-        const w = Math.abs(bx - ax);
-        const h = Math.abs(by - ay);
-        ctx.fillRect(x, y, w, h);
-        ctx.strokeRect(x, y, w, h);
-        dots.push(
+        ctx.beginPath();
+        rectCorners(sel).forEach(([px, py], i) => {
+          const [sx, sy] = cellToScreen(px, py, primary, st);
+          if (i === 0) ctx.moveTo(sx, sy);
+          else ctx.lineTo(sx, sy);
+        });
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        const geom = rectScreenGeom(sel, primary, st);
+        const { x, y, w, h } = geom.rect;
+        for (const p of [
           [x, y], [x + w / 2, y], [x + w, y],
           [x, y + h / 2], [x + w, y + h / 2],
-          [x, y + h], [x + w / 2, y + h], [x + w, y + h]
-        );
+          [x, y + h], [x + w / 2, y + h], [x + w, y + h],
+        ]) {
+          dots.push(geom.toScreen(p[0], p[1]));
+        }
+        // Rotate knob on a stalk above the top edge.
+        const [kx, ky] = geom.knob;
+        ctx.beginPath();
+        ctx.moveTo(geom.topMid[0], geom.topMid[1]);
+        ctx.lineTo(kx, ky);
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(90,190,255,1)';
+        ctx.beginPath();
+        ctx.arc(kx, ky, 5, 0, 2 * Math.PI);
+        ctx.fill();
+        // Circular arrow round the knob so it reads as "rotate".
+        const ringR = 10;
+        const a0 = -0.35 * Math.PI;
+        const a1 = 1.15 * Math.PI;
+        ctx.beginPath();
+        ctx.arc(kx, ky, ringR, a0, a1);
+        ctx.stroke();
+        const tipX = kx + ringR * Math.cos(a1);
+        const tipY = ky + ringR * Math.sin(a1);
+        const tan = a1 + Math.PI / 2; // direction the arc travels at its end
+        ctx.beginPath();
+        ctx.moveTo(tipX + 5 * Math.cos(tan), tipY + 5 * Math.sin(tan));
+        ctx.lineTo(tipX + 4 * Math.cos(tan - 2.4), tipY + 4 * Math.sin(tan - 2.4));
+        ctx.lineTo(tipX + 4 * Math.cos(tan + 2.4), tipY + 4 * Math.sin(tan + 2.4));
+        ctx.closePath();
+        ctx.fill();
+        if (sel.angle) {
+          const label = `${sel.angle}°`;
+          ctx.font = '12px sans-serif';
+          const tw = ctx.measureText(label).width;
+          const lx = kx + ringR + 8;
+          const ly = ky - 9;
+          ctx.fillStyle = 'rgba(10,14,18,0.85)';
+          ctx.beginPath();
+          ctx.roundRect(lx, ly, tw + 10, 18, 4);
+          ctx.fill();
+          ctx.fillStyle = '#cfe8ff';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(label, lx + 5, ly + 9);
+        }
       } else {
         ctx.beginPath();
         sel.pts.forEach(([px, py], i) => {
@@ -584,6 +711,7 @@ export default function MapViewer({
     shapes,
     selectedShapeId,
     cellToScreen,
+    rectScreenGeom,
     previewRotationDeg,
     cropDrawArmed,
   ]);
@@ -620,19 +748,18 @@ export default function MapViewer({
         return null;
       }
       if (shape.kind === 'rect') {
-        const [ax, ay] = cellToScreen(shape.x0, shape.y0, g, st);
-        const [bx, by] = cellToScreen(shape.x1 + 1, shape.y1 + 1, g, st);
-        const rect = {
-          x: Math.min(ax, bx),
-          y: Math.min(ay, by),
-          w: Math.abs(bx - ax),
-          h: Math.abs(by - ay),
-        };
+        const geom = rectScreenGeom(shape, g, st);
+        if (withHandles && Math.hypot(x - geom.knob[0], y - geom.knob[1]) <= ROTATE_KNOB_HIT_PX) {
+          return { mode: 'rotate' };
+        }
+        // Test in the rect's own (unrotated) frame.
+        const [ux, uy] = geom.fromScreen(x, y);
+        const { rect } = geom;
         if (withHandles) {
-          const handle = cropHandleAt(x, y, rect);
+          const handle = cropHandleAt(ux, uy, rect);
           if (handle) return { mode: 'rect-handle', handle };
         }
-        if (x > rect.x && x < rect.x + rect.w && y > rect.y && y < rect.y + rect.h) {
+        if (ux > rect.x && ux < rect.x + rect.w && uy > rect.y && uy < rect.y + rect.h) {
           return { mode: 'move' };
         }
         return null;
@@ -648,7 +775,7 @@ export default function MapViewer({
       if (pointInPolygon(x, y, screenPts)) return { mode: 'move' };
       return null;
     },
-    [cellToScreen]
+    [cellToScreen, rectScreenGeom]
   );
 
   useEffect(() => {
@@ -705,7 +832,7 @@ export default function MapViewer({
       const beginDrag = (shape, hit) => {
         st.shapeDrag = {
           ...hit,
-          startCell: { cellX: w.cellX, cellY: w.cellY },
+          startCell: { cellX: w.cellX, cellY: w.cellY, fx: w.fx, fy: w.fy },
           orig: JSON.parse(JSON.stringify(shape)),
           pushed: false,
         };
@@ -764,10 +891,12 @@ export default function MapViewer({
             );
           canvasRef.current.style.cursor = selHit
             ? selHit.mode === 'rect-handle'
-              ? CROP_CURSORS[selHit.handle]
-              : selHit.mode === 'move'
-                ? 'move'
-                : 'pointer'
+              ? rotatedCursor(selHit.handle, selectedShape.angle)
+              : selHit.mode === 'rotate'
+                ? 'grab'
+                : selHit.mode === 'move'
+                  ? 'move'
+                  : 'pointer'
             : otherHit
               ? 'move'
               : '';
@@ -802,8 +931,21 @@ export default function MapViewer({
           };
           const [px, py] = d.orig.pts[d.index];
           changed = px !== w.cellX || py !== w.cellY;
+        } else if (d.mode === 'rotate') {
+          // Turn about the centre by however far the pointer has swung round it.
+          const cx = (d.orig.x0 + d.orig.x1 + 1) / 2;
+          const cy = (d.orig.y0 + d.orig.y1 + 1) / 2;
+          const swept =
+            Math.atan2(w.fy - cy, w.fx - cx) - Math.atan2(d.startCell.fy - cy, d.startCell.fx - cx);
+          const snap = e.shiftKey ? 15 : 1;
+          const raw = (d.orig.angle || 0) + (swept * 180) / Math.PI;
+          const angle = ((((Math.round(raw / snap) * snap) % 360) + 540) % 360) - 180 || 0;
+          next = { ...d.orig, angle };
+          changed = angle !== (d.orig.angle || 0);
         } else {
-          next = resizeShapeRect(d.orig, d.handle, w);
+          next = d.orig.angle
+            ? resizeRotatedRect(d.orig, d.handle, w.fx, w.fy)
+            : resizeShapeRect(d.orig, d.handle, w);
           changed =
             next.x0 !== d.orig.x0 || next.y0 !== d.orig.y0 ||
             next.x1 !== d.orig.x1 || next.y1 !== d.orig.y1;

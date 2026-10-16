@@ -406,6 +406,9 @@ export default function MapLayerEditor({
         : 'Select "Draw crop box", then click two opposite corners on the map.';
     }
     if (selectedId != null) {
+      if (shapes.find((s) => s.id === selectedId)?.kind === 'rect') {
+        return 'Drag to move, drag a handle to resize, or drag the round handle to rotate (Shift snaps to 15°). Delete removes it; Esc deselects.';
+      }
       return 'Drag the shape to move it, or drag a handle to resize. Delete removes it; Esc deselects.';
     }
     if (colorMode === 'semantic' && !activeRegion) {
