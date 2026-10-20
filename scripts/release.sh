@@ -6,6 +6,12 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# Use a local Node toolchain if one has been unpacked into .node/
+# Using the latest nodejs (v24) is important for consistent frontend builds
+if [ -x .node/bin/node ]; then
+    PATH="$PWD/.node/bin:$PATH"
+fi
+
 echo "==> Building the UI"
 (cd frontend && npm ci && npm run build)
 
@@ -15,7 +21,7 @@ static="stretch4_nav_webapp/static"
 
 echo "==> Building the wheel and the sdist"
 rm -rf dist build ./*.egg-info
-python3 -m build
+uv build
 
 echo "==> Checking the artifacts carry the UI and the config"
 python3 - <<'PY'
@@ -40,28 +46,15 @@ with tarfile.open(sdist) as tf:
 check(sdist, names, prefix=f"{names[0].split('/')[0]}/")
 PY
 
-# twine needs packaging >= 24.2 to read the Metadata 2.4 that the license
-# fields produce; older versions fail at upload too, with a confusing error.
-python3 - <<'VERCHECK'
-import sys
-import packaging
-from packaging.version import Version
-
-if Version(packaging.__version__) < Version("24.2"):
-    sys.exit(
-        f"ERROR: packaging {packaging.__version__} is too old to validate this "
-        "package (needs >= 24.2).\n"
-        "       Fix with: pip3 install --user -U build twine"
-    )
-VERCHECK
-
-python3 -m twine check dist/*
+uvx twine check dist/*
 
 cat <<'MSG'
 
 ==> Ready. Upload with:
-      python3 -m twine upload dist/*
+      uv publish --token <pypi-token>
 
     Test it first if you like:
-      python3 -m twine upload --repository testpypi dist/*
+      uv publish --publish-url https://test.pypi.org/legacy/ --token <testpypi-token>
+
+    Or set UV_PUBLISH_TOKEN in the environment and drop the --token flag.
 MSG

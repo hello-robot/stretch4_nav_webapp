@@ -263,9 +263,9 @@ whole map. It is not a paint tool:
 
 ## Developing
 
-For changing the code rather than just running it. Needs Node 18+
-(`node --version`) on top of the requirements above, because here you build the
-UI yourself instead of getting it prebuilt from PyPI.
+For changing the code rather than just running it. We're using Node v24 and we
+recommend verifying you have the same version (`node --version`), because here
+you build the UI yourself instead of getting it prebuilt from PyPI.
 
 ```bash
 git clone https://github.com/hello-robot/stretch4_nav_webapp
@@ -285,11 +285,41 @@ stretch_nav_webapp
 > `frontend/src`.** If you change anything under `frontend/src` and skip
 > `npm run build`, the browser keeps showing the old version.
 
-Tests:
+### Testing
 
 ```bash
 python3 -m pytest
 ```
+
+### Releasing
+
+Releases are built with a pinned local Node (v24) so the UI bundle is the same
+no matter what Node the machine has. One-time setup, from the repo root:
+
+```bash
+NODE_VER=v24.21.0
+mkdir -p .node
+curl -fsSL "https://nodejs.org/dist/$NODE_VER/node-$NODE_VER-linux-x64.tar.xz" \
+  | tar -xJ --strip-components=1 -C .node
+.node/bin/node --version          # v24.21.0
+```
+
+`scripts/release.sh` puts `.node/bin` first on `PATH` when it exists.
+
+Then, for each release:
+
+1. Bump `version` in `pyproject.toml` to today's date (CalVer, `YYYY.MM.DD`).
+2. Build and check the artifacts:
+
+   ```bash
+   scripts/release.sh
+   ```
+
+3. Upload:
+
+   ```bash
+   uv publish --token <pypi-token>
+   ```
 
 ---
 
