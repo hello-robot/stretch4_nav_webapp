@@ -12,3 +12,4 @@ stretch4_nav_webapp/static/
 *.log
 .DS_Store
 .vscode/
+.node/
