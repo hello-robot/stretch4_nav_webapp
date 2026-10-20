@@ -770,6 +770,7 @@ select {
 }
 
 .cp-goal-status[data-state='failed'] {
+  white-space: pre-line;
   color: #f09a9a;
   background: var(--danger-soft);
   border-left-color: var(--danger);
@@ -1057,6 +1058,17 @@ select {
 
 .cp-form input {
   width: 100%;
+}
+
+.cp-steps {
+  margin: 0;
+  padding-left: 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: var(--text-muted);
 }
 
 .cp-form__actions {
@@ -2227,4 +2239,59 @@ select {
 .rs-foot__age {
   font-size: 0.73rem;
   color: var(--text-muted);
+}
+
+/* Robot connect / disconnect switch in the top bar. */
+.link-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.3rem 0.6rem;
+  font: inherit;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.link-switch:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.link-switch__track {
+  position: relative;
+  width: 30px;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--danger-soft);
+  border: 1px solid var(--danger);
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.link-switch__knob {
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--danger);
+  transition: transform 0.15s, background 0.15s;
+}
+
+.link-switch--on {
+  color: var(--text);
+}
+
+.link-switch--on .link-switch__track {
+  background: var(--ok-soft);
+  border-color: var(--ok);
+}
+
+.link-switch--on .link-switch__knob {
+  transform: translateX(14px);
+  background: var(--ok);
 }

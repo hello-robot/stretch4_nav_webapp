@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 
 from stretch4_nav_webapp.modes.base import Mode, ModeContext, register, shlex_split_launch
@@ -81,7 +82,11 @@ class NavigationMode(Mode):
                 use_rviz=use_rviz,
             )
 
-        ctx.process_manager.set_active_mode(self.id, cmd)
+        docking_launches = (ctx.config.get("docking") or {}).get("launches") or []
+        companions = {
+            f"docking:{i}": shlex.split(str(launch)) for i, launch in enumerate(docking_launches)
+        }
+        ctx.process_manager.set_active_mode(self.id, cmd, companions=companions)
         ctx.extras["nav_map_name"] = map_name
         return {
             "ok": True,
@@ -91,6 +96,7 @@ class NavigationMode(Mode):
             "use_speed": use_speed,
             "filters_enabled": use_keepout or use_speed,
             "command": cmd,
+            "docking": bool(companions),
             "map_yaml": str(map_yaml),
             "keepout_yaml": str(keepout_yaml) if use_keepout else None,
             "speed_yaml": str(speed_yaml) if use_speed else None,

@@ -144,13 +144,37 @@ class _Watcher:
         self._sample_t = 0.0
         self._error: str | None = None
         self._started = False
+        # Bumped by stop(): a supervisor from an older generation exits.
+        self._generation = 0
+        self._proc: subprocess.Popen | None = None
 
     def ensure_started(self) -> None:
         with self._lock:
             if self._started:
                 return
             self._started = True
-        threading.Thread(target=self._supervise, daemon=True, name="robot-watch").start()
+            gen = self._generation
+        threading.Thread(
+            target=self._supervise, args=(gen,), daemon=True, name="robot-watch"
+        ).start()
+
+    def stop(self) -> None:
+        """Stop watching (the app disconnected from the robot). ensure_started() resumes."""
+        with self._lock:
+            self._started = False
+            self._generation += 1
+            proc = self._proc
+            self._sample = None
+            self._error = None
+        if proc is not None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+
+    def _current(self, gen: int) -> bool:
+        with self._lock:
+            return gen == self._generation
 
     def snapshot(self) -> tuple[dict | None, float, str | None]:
         """Return ``(sample, age_seconds, error)``. Sample may be stale or None."""
@@ -168,9 +192,9 @@ class _Watcher:
                 self._sample_t = time.time()
                 self._error = None
 
-    def _supervise(self) -> None:
+    def _supervise(self, gen: int) -> None:
         backoff = self.MIN_BACKOFF_S
-        while True:
+        while self._current(gen):
             got_sample = False
             try:
                 got_sample = self._run_once()
@@ -182,7 +206,9 @@ class _Watcher:
             # promptly. A run that never produced one is a robot that isn't
             # there, so back off instead of respawning python every 3 seconds.
             backoff = self.MIN_BACKOFF_S if got_sample else min(backoff * 2, self.MAX_BACKOFF_S)
-            time.sleep(backoff)
+            deadline = time.time() + backoff
+            while time.time() < deadline and self._current(gen):
+                time.sleep(0.5)
 
     def _run_once(self) -> bool:
         proc = subprocess.Popen(
@@ -192,6 +218,8 @@ class _Watcher:
             text=True,
             env=_helper_env(),
         )
+        with self._lock:
+            self._proc = proc
         got_sample = False
         try:
             for line in proc.stdout:  # type: ignore[union-attr]
@@ -227,6 +255,11 @@ class _Watcher:
 
 
 _watcher = _Watcher()
+
+
+def stop_watching() -> None:
+    """Stop the robot status stream (the app disconnected from the robot)."""
+    _watcher.stop()
 
 # The watch stream is the normal source. This one-shot is only for the first
 # seconds after boot, before the stream has produced anything — rate-limited so

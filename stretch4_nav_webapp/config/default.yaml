@@ -14,6 +14,19 @@ launches:
 
 use_rviz: "false"
 
+# stretch_nav2's DockRobot / UndockRobot action servers. An empty list turns docking off.
+docking:
+  launches:
+    - "ros2 run stretch_nav2 docking_server.py"
+    - "ros2 run stretch_nav2 undocking_server.py"
+
+# "Find dock": started next to navigation while the robot looks for its dock,
+# then stopped. discover_dock itself is added by the app.
+dock_discovery:
+  launches:
+    - "ros2 launch stretch_core luxonis.launch.py use_left:=false use_right:=false use_center:=true"
+    - "ros2 launch stretch_tag_perception stretch_aruco.launch.py cameras:=center"
+
 # Right head camera (Luxonis OAK-FFC-3P) for the on-demand camera panel on the
 camera:
   label: "Right head camera"

@@ -132,7 +132,7 @@ function makePoseArrow(color) {
 }
 
 // Billboarded text label for location names.
-function makeLabel(text) {
+function makeLabel(text, { border = 'rgba(240,165,61,0.9)', color = '#ffd88a' } = {}) {
   const pad = 8;
   const fontPx = 44;
   const measure = document.createElement('canvas').getContext('2d');
@@ -145,10 +145,10 @@ function makeLabel(text) {
   ctx.font = `${fontPx}px sans-serif`;
   ctx.fillStyle = 'rgba(15,20,26,0.78)';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.strokeStyle = 'rgba(240,165,61,0.9)';
+  ctx.strokeStyle = border;
   ctx.lineWidth = 3;
   ctx.strokeRect(1.5, 1.5, canvas.width - 3, canvas.height - 3);
-  ctx.fillStyle = '#ffd88a';
+  ctx.fillStyle = color;
   ctx.textBaseline = 'middle';
   ctx.fillText(text, pad, canvas.height / 2);
   const tex = new THREE.CanvasTexture(canvas);
@@ -160,8 +160,13 @@ function makeLabel(text) {
   return sprite;
 }
 
-const MODE_COLORS = { goal: 0x3ecf8e, initial: 0x3d9cf0, location: 0xf0a53d };
-const INTERACTIVE_MODES = ['goal', 'initial', 'location'];
+const DOCK_COLOR = 0x2fc6b0;
+const DOCK_LABEL_STYLE = { border: 'rgba(47,198,176,0.9)', color: '#9ff0e2' };
+const MODE_COLORS = { goal: 0x3ecf8e, initial: 0x3d9cf0, location: 0xf0a53d, dock: DOCK_COLOR };
+const INTERACTIVE_MODES = ['goal', 'initial', 'location', 'dock'];
+
+export const dockFacingFromYaw = (yaw) => yaw - Math.PI / 2;
+export const dockYawFromFacing = (facing) => facing + Math.PI / 2;
 
 /**
  * Three.js top-down map viewer with RViz-parity overlays.
@@ -197,6 +202,10 @@ export default function MapViewer({
   onPose,
   locations = [], // [{ id, name, x, y, yaw }] — saved goals, display only
   pendingLocation = null, // { x, y, yaw } being placed on the map
+  dock = null, // { x, y, yaw } charging dock (docking_station_link in map)
+  pendingDock = null, // { x, y, yaw } dock being placed, same convention
+  dockModel = null, // THREE.Object3D of the dock URDF, or null for a plain marker
+  showDock = true,
   initialPoseMarker = null, // { x, y, yaw } last set-pose, brief confirmation
   // Pose of the local costmap's frame (e.g. wheel_odom) in the map frame, so a
   // rolling odom-frame costmap is drawn where the robot actually is after AMCL
@@ -253,6 +262,7 @@ export default function MapViewer({
       footprint: new THREE.Group(),
       robot: new THREE.Group(),
       locations: new THREE.Group(),
+      dock: new THREE.Group(),
       markers: new THREE.Group(),
     };
     Object.values(layers).forEach((g) => scene.add(g));
@@ -676,6 +686,53 @@ export default function MapViewer({
       }
     });
   }, [locations]);
+
+  // Charging dock: the dock URDF where it stands,
+  // with a label and an arrow out of its front. The model is owned by the
+  // caller's useUrdfRobot, so it is detached here, never disposed.
+  useEffect(() => {
+    const st = stateRef.current;
+    if (!st) return undefined;
+    const group = st.layers.dock;
+    const owned = [];
+    group.visible = showDock;
+    const pose = pendingDock || dock;
+    if (showDock && pose) {
+      const facing = dockFacingFromYaw(pose.yaw ?? 0);
+      if (dockModel) {
+        dockModel.traverse((o) => {
+          if (o.isMesh && o.material?.color) o.material.color.setHex(DOCK_COLOR);
+        });
+        dockModel.position.set(pose.x, pose.y, 0);
+        dockModel.rotation.set(0, 0, pose.yaw ?? 0);
+        group.add(dockModel);
+      }
+      const arrow = makePoseArrow(DOCK_COLOR);
+      arrow.position.set(pose.x, pose.y, 0.2);
+      arrow.rotation.z = facing;
+      if (dockModel) arrow.children[0].visible = false; // the model is the body
+      group.add(arrow);
+      owned.push(arrow);
+      const label = makeLabel(pendingDock ? 'Dock (unsaved)' : 'Dock', DOCK_LABEL_STYLE);
+      // Behind the dock, so the label never covers the robot's approach.
+      label.position.set(pose.x - 0.45 * Math.cos(facing), pose.y - 0.45 * Math.sin(facing), 0.3);
+      group.add(label);
+      owned.push(label);
+    }
+    return () => {
+      if (dockModel?.parent === group) group.remove(dockModel);
+      owned.forEach((o) => {
+        group.remove(o);
+        o.traverse?.((c) => {
+          c.geometry?.dispose?.();
+          if (c.material) {
+            c.material.map?.dispose?.();
+            c.material.dispose?.();
+          }
+        });
+      });
+    };
+  }, [dock, pendingDock, dockModel, showDock]);
 
   // Pending (being-placed) location marker.
   useEffect(() => {

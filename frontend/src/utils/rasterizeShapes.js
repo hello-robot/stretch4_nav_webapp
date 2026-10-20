@@ -29,6 +29,25 @@ export function fillRectInto(pixels, W, H, x0, y0, x1, y1, value) {
   }
 }
 
+/**
+ * Outline of a rect shape as four corners (bl, br, tr, tl before rotation).
+ * The rect covers cells x0..x1 / y0..y1 inclusive and turns `angle` degrees
+ * counter-clockwise about its centre.
+ */
+export function rectCorners(s) {
+  const cx = (s.x0 + s.x1 + 1) / 2;
+  const cy = (s.y0 + s.y1 + 1) / 2;
+  const hw = (s.x1 - s.x0 + 1) / 2;
+  const hh = (s.y1 - s.y0 + 1) / 2;
+  const t = ((s.angle || 0) * Math.PI) / 180;
+  const c = Math.cos(t);
+  const sn = Math.sin(t);
+  return [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]].map(([u, v]) => [
+    cx + u * c - v * sn,
+    cy + u * sn + v * c,
+  ]);
+}
+
 // Even-odd scanline fill, sampled at cell centers.
 export function fillPolygonInto(pixels, W, H, pts, value) {
   if (pts.length < 3) return;
@@ -65,6 +84,7 @@ export function rasterizeShapes(base, W, H, shapes) {
   const out = base.slice();
   for (const s of shapes || []) {
     if (s.kind === 'circle') fillCircleInto(out, W, H, s.cx, s.cy, s.r, s.value);
+    else if (s.kind === 'rect' && s.angle) fillPolygonInto(out, W, H, rectCorners(s), s.value);
     else if (s.kind === 'rect') fillRectInto(out, W, H, s.x0, s.y0, s.x1, s.y1, s.value);
     else if (s.kind === 'poly') fillPolygonInto(out, W, H, s.pts, s.value);
   }
