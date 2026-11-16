@@ -5,6 +5,7 @@ import { useUrdfRobot } from '../hooks/useUrdfRobot';
 import PreflightScreen from '../components/PreflightScreen';
 import MapViewer, { dockYawFromFacing } from '../components/MapViewer';
 import CameraPanel from '../components/CameraPanel';
+import DrivePanel from '../components/DrivePanel';
 import {
   lookupPose,
   orientationFromYaw,
@@ -94,6 +95,8 @@ export default function NavigationPage({
   onStatusRefresh,
   onError,
   onBusy,
+  onStopping,
+  stopping,
 }) {
   const { readiness, refresh, home, stow } = robot;
   const [maps, setMaps] = useState([]);
@@ -593,6 +596,7 @@ export default function NavigationPage({
 
   const stopNav = async () => {
     onBusy?.(true);
+    onStopping?.('navigation');
     try {
       await api('/api/modes/stop', { method: 'POST', body: '{}' });
       setGoalPose(null);
@@ -610,6 +614,7 @@ export default function NavigationPage({
     } catch (err) {
       onError?.(err.message);
     } finally {
+      onStopping?.(null);
       onBusy?.(false);
     }
   };
@@ -1410,6 +1415,7 @@ export default function NavigationPage({
           <button
             type="button"
             className="btn danger block"
+            disabled={!!stopping}
             onClick={stopNav}
             title="Shut down Nav2 and go back to the setup screen."
           >
@@ -1488,6 +1494,7 @@ export default function NavigationPage({
             </div>
           ))}
         <CameraPanel rosbridgeUrl={rosbridgeUrl} onError={onError} />
+        <DrivePanel rosbridgeUrl={rosbridgeUrl} disabled={!!robot?.runstop?.engaged} onError={onError} />
       </div>
     </>
   );

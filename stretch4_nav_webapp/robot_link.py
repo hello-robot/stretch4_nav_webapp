@@ -39,9 +39,27 @@ def _pgid_alive(pgid: int) -> bool:
         return False
 
 
+def _adopted_by_reaper(ppid: int) -> bool:
+    """Return True if a process looks orphaned, given its parent's PID (`ppid`).
+
+    When a process's parent dies, Linux re-parents it to a "reaper". That is PID 1 on some
+    systems, but on a desktop session it is the per-user `systemd --user` process instead.
+    So a parent of PID 1 or `systemd` means the original parent is gone and the process is a
+    leftover.
+    """
+    if ppid == 1:
+        return True
+    try:
+        argv0 = (Path("/proc") / str(ppid) / "cmdline").read_bytes().split(b"\0")[0].decode(errors="replace")
+    except OSError:
+        return True  # the parent is already gone
+    return os.path.basename(argv0) == "systemd"
+
+
 def stop_orphan_mode_launches() -> None:
     """Stop mode launches left behind by a previous backend that died. """
-    patterns = ("launch stretch_nav2",)
+    # The mode launch, and the companion `ros2 run` servers (docking, undocking) started beside it.
+    patterns = ("launch stretch_nav2", "run stretch_nav2")
     pgids: set[int] = set()
     for proc in Path("/proc").iterdir():
         if not proc.name.isdigit():
@@ -57,8 +75,8 @@ def stop_orphan_mode_launches() -> None:
                 continue
             stat_fields = (proc / "stat").read_text().rsplit(") ", 1)[1].split()
             ppid = int(stat_fields[1])  # field 4 of /proc/pid/stat
-            if ppid != 1:
-                continue  # parent alive — owned by a running backend
+            if not _adopted_by_reaper(ppid):
+                continue  # parent alive — owned by a running backend or a terminal
             pgid = os.getpgid(int(proc.name))
         except (OSError, ValueError, IndexError):
             continue

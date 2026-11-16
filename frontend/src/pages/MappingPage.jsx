@@ -5,6 +5,7 @@ import { useUrdfRobot } from '../hooks/useUrdfRobot';
 import PreflightScreen from '../components/PreflightScreen';
 import MapViewer from '../components/MapViewer';
 import CameraPanel from '../components/CameraPanel';
+import DrivePanel from '../components/DrivePanel';
 import {
   lookupPose,
   orientationFromYaw,
@@ -52,6 +53,8 @@ export default function MappingPage({
   onStatusRefresh,
   onError,
   onBusy,
+  onStopping,
+  stopping,
 }) {
   const { readiness, refresh, home, stow } = robot;
   const [mapName, setMapName] = useState('new_map');
@@ -81,6 +84,7 @@ export default function MappingPage({
 
   const stopMapping = async () => {
     onBusy?.(true);
+    onStopping?.('mapping');
     try {
       await api('/api/modes/stop', { method: 'POST', body: '{}' });
       setStartedUnchecked(false);
@@ -88,6 +92,7 @@ export default function MappingPage({
     } catch (err) {
       onError?.(err.message);
     } finally {
+      onStopping?.(null);
       onBusy?.(false);
     }
   };
@@ -272,6 +277,7 @@ export default function MappingPage({
           <button
             type="button"
             className="btn danger block"
+            disabled={!!stopping}
             onClick={stopMapping}
             title="Shut down slam_toolbox and go back to the setup screen."
           >
@@ -293,6 +299,7 @@ export default function MappingPage({
           clickMode="view"
         />
         <CameraPanel rosbridgeUrl={rosbridgeUrl} onError={onError} />
+        <DrivePanel rosbridgeUrl={rosbridgeUrl} disabled={!!robot?.runstop?.engaged} onError={onError} />
       </div>
     </>
   );
