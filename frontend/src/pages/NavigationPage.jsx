@@ -1113,9 +1113,11 @@ export default function NavigationPage({
               <button
                 type="button"
                 className="btn"
-                disabled={!dock || dockActive || dockRequesting}
+                disabled={!dock || dockActive || dockRequesting || readiness?.plugged_in === true}
                 title={
-                  dock
+                  readiness?.plugged_in === true
+                    ? 'The robot is already on the dock.'
+                    : dock
                     ? 'Drive to the marked dock, line up and dock to charge.'
                     : 'Mark the dock on the map first.'
                 }
