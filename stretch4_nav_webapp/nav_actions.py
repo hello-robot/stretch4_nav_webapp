@@ -278,13 +278,18 @@ def _ensure_spinner() -> None:
     _spinner_started = True
 
     def run() -> None:
-        while True:
+        import rclpy
+
+        # rclpy shuts its context down when the process is signalled; spinning a dead context only
+        # raises, so stop instead of logging a warning every 50 ms until the process exits.
+        while rclpy.ok():
             try:
                 with _lock:
                     _spin_once(0.0)
             except Exception as exc:  # noqa: BLE001 - keep spinning through a bad callback
                 logger.warning("docking spinner: %s", exc)
             time.sleep(0.05)
+        logger.info("docking spinner stopped: rclpy is shut down")
 
     threading.Thread(target=run, daemon=True, name="nav-actions-spin").start()
 
@@ -325,6 +330,7 @@ def _send_dock_goal(action: str, client, goal, wait_server_sec: float) -> dict[s
     name, server = (
         ("dock_robot", "docking_server") if action == "dock" else ("undock_robot", "undocking_server")
     )
+    _expire_dock_if_server_gone()
     if not client.wait_for_server(timeout_sec=wait_server_sec):
         raise TimeoutError(
             f"{name} action server not available (is stretch_nav2's {server} "
@@ -444,8 +450,41 @@ def cancel_docking(timeout_sec: float = 5.0) -> dict[str, Any]:
     return {"ok": True, "cancelled": True}
 
 
+_SERVER_GONE_GRACE_SEC = 3.0
+_server_gone_since: float | None = None
+
+
+def _expire_dock_if_server_gone() -> None:
+    """Fail a dock / undock request whose action server has gone away.
+
+    The goal lives in the server process. If that process exits or is restarted its result never
+    arrives, and the request would stay "active" forever and block every new one. A short grace
+    period rides out momentary graph hiccups.
+    """
+    global _server_gone_since
+    with _dock_lock:
+        action, state, seq = _dock["action"], _dock["state"], _dock["seq"]
+    if state not in ("active", "cancelling"):
+        _server_gone_since = None
+        return
+    client = _dock_client if action == "dock" else _undock_client
+    if client is None or client.server_is_ready():
+        _server_gone_since = None
+        return
+    now = time.time()
+    if _server_gone_since is None:
+        _server_gone_since = now
+    elif now - _server_gone_since >= _SERVER_GONE_GRACE_SEC:
+        _server_gone_since = None
+        _set_dock(
+            seq, state="failed", handle=None,
+            message=f"The {action} server went away (restarted?). Try again.",
+        )
+
+
 def dock_status() -> dict[str, Any]:
     """What the last dock / undock request is doing, for the UI to poll."""
+    _expire_dock_if_server_gone()
     with _dock_lock:
         return {
             "action": _dock["action"],

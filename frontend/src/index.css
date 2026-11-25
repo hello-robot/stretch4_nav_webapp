@@ -2003,6 +2003,155 @@ select {
   word-break: break-all;
 }
 
+/* --- Manual drive pad (top-left of the map, opposite the camera panel) --- */
+
+.drive-fab,
+.drive-panel {
+  position: absolute;
+  top: 0.75rem;
+  left: 0.75rem;
+  z-index: 20;
+}
+
+.drive-fab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.45rem 0.8rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: rgba(16, 22, 29, 0.88);
+  color: var(--text);
+  font-size: 0.85rem;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+}
+
+.drive-fab:hover {
+  border-color: var(--accent);
+  background: rgba(28, 38, 50, 0.92);
+}
+
+.drive-panel {
+  width: 200px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(16, 22, 29, 0.92);
+  backdrop-filter: blur(6px);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+
+.drive-panel--min {
+  width: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+  padding: 0.2rem 0.3rem 0.2rem 0.7rem;
+  border-radius: 999px;
+}
+
+.drive-panel__title {
+  margin-right: auto;
+  font-size: 0.82rem;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.drive-pad {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-template-areas:
+    'ccw fwd cw'
+    'left . right'
+    '. back .';
+  gap: 0.35rem;
+  padding: 0.6rem;
+}
+
+.drive-pad__btn {
+  aspect-ratio: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text);
+  font-size: 1.15rem;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.drive-pad__btn:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.drive-pad__btn.is-active {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+}
+
+.drive-pad__btn:disabled {
+  opacity: 0.4;
+}
+
+.drive-pad__ccw { grid-area: ccw; }
+.drive-pad__fwd { grid-area: fwd; }
+.drive-pad__cw { grid-area: cw; }
+.drive-pad__left { grid-area: left; }
+.drive-pad__right { grid-area: right; }
+.drive-pad__back { grid-area: back; }
+
+.drive-panel__speed {
+  display: flex;
+  gap: 0.25rem;
+  padding: 0 0.6rem;
+}
+
+.drive-panel__speed button {
+  flex: 1;
+  padding: 0.25rem 0;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
+.drive-panel__speed button.is-on {
+  color: var(--text);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.drive-panel__hint {
+  margin: 0;
+  padding: 0.5rem 0.6rem 0.6rem;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+.stopping-banner {
+  position: absolute;
+  z-index: 40;
+  top: 1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  max-width: min(520px, calc(100vw - 2rem));
+  padding: 0.6rem 0.9rem;
+  font-size: 0.85rem;
+  color: var(--text);
+  background: #4a3a14;
+  border: 1px solid #e0a63a;
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+}
+
 /* ── Runstop: the stop button, and the warning when it is on ──────────────── */
 
 .runstop-btn {

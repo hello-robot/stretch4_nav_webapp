@@ -7,6 +7,7 @@ import ActionsMenu from './components/ActionsMenu';
 import ErrorBoundary from './components/ErrorBoundary';
 import RobotStatusPanel from './components/RobotStatusPanel';
 import RunstopBanner from './components/RunstopBanner';
+import StoppingBanner from './components/StoppingBanner';
 import RunstopButton from './components/RunstopButton';
 import { useRobotReadiness } from './hooks/useRobotReadiness';
 import { useRunstop } from './hooks/useRunstop';
@@ -64,6 +65,8 @@ export default function App() {
   const [rosOk, setRosOk] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  // Name of the mode being shut down ('navigation', ...), or null. Shutdown can take 15+ s.
+  const [stopping, setStopping] = useState(null);
   const [rosbridgeUrl, setRosbridgeUrl] = useState(defaultRosbridgeUrl(9090));
   const [actionsOpen, setActionsOpen] = useState(false);
   const [statusOpen, setStatusOpen] = useState(false);
@@ -171,6 +174,7 @@ export default function App() {
 
   const stopMode = async () => {
     setBusy(true);
+    setStopping(active || 'mode');
     try {
       await api('/api/modes/stop', { method: 'POST', body: '{}' });
       setPage('home');
@@ -178,6 +182,7 @@ export default function App() {
     } catch (err) {
       setError(err.message);
     } finally {
+      setStopping(null);
       setBusy(false);
     }
   };
@@ -202,7 +207,7 @@ export default function App() {
           <button type="button" className="mode-btn" disabled={busy} onClick={() => setPage('home')}>
             Overview
           </button>
-          <button type="button" className="mode-btn" disabled={busy || !active} onClick={stopMode}>
+          <button type="button" className="mode-btn" disabled={busy || !active || !!stopping} onClick={stopMode}>
             Stop mode
           </button>
         </nav>
@@ -274,6 +279,7 @@ export default function App() {
       )}
 
       <main className="main">
+        {stopping && <StoppingBanner mode={stopping} />}
         {(page === 'mapping' || page === 'navigation') && active === page && (
           <RunstopBanner runstop={runstop} />
         )}
@@ -316,6 +322,8 @@ export default function App() {
               onStatusRefresh={refreshStatus}
               onError={setError}
               onBusy={setBusy}
+              onStopping={setStopping}
+              stopping={stopping}
             />
           )}
           {page === 'edit_map' && (
@@ -329,6 +337,8 @@ export default function App() {
               onStatusRefresh={refreshStatus}
               onError={setError}
               onBusy={setBusy}
+              onStopping={setStopping}
+              stopping={stopping}
             />
           )}
         </ErrorBoundary>
